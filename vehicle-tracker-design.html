@@ -1,0 +1,585 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vehicle Tracker — System Design</title>
+<style>
+  :root{
+    --ink:#1b2430; --muted:#5b6675; --line:#d8dde4; --bg:#ffffff; --panel:#f5f7fa;
+    --accent:#0b6e4f; --accent2:#1f5fa8; --warn:#a15c00;
+  }
+  *{box-sizing:border-box}
+  html{font-size:15px}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:"Inter","Segoe UI",system-ui,-apple-system,Helvetica,Arial,sans-serif;line-height:1.55}
+  main{max-width:960px;margin:0 auto;padding:48px 32px 80px}
+  header.cover{border-bottom:3px solid var(--accent);padding-bottom:20px;margin-bottom:28px}
+  .kicker{text-transform:uppercase;letter-spacing:.12em;font-size:.75rem;color:var(--accent);font-weight:700}
+  h1{font-size:2.2rem;margin:.2em 0 .1em;line-height:1.15}
+  .meta{color:var(--muted);font-size:.9rem}
+  h2{font-size:1.35rem;margin:2.2em 0 .6em;padding-bottom:6px;border-bottom:1px solid var(--line)}
+  h3{font-size:1.05rem;margin:1.6em 0 .4em}
+  p,li{max-width:72ch}
+  code,pre{font-family:"JetBrains Mono",ui-monospace,Menlo,Consolas,monospace;font-size:.85em}
+  code{background:var(--panel);padding:1px 5px;border-radius:4px}
+  pre{background:#0f1720;color:#e6edf3;padding:14px 16px;border-radius:8px;overflow:auto;line-height:1.45}
+  pre code{background:none;padding:0;color:inherit}
+  table{border-collapse:collapse;width:100%;margin:12px 0 18px;font-size:.9rem}
+  th,td{border:1px solid var(--line);padding:7px 10px;text-align:left;vertical-align:top}
+  th{background:var(--panel);font-weight:600}
+  .callout{border-left:4px solid var(--accent);background:#eef7f3;padding:12px 16px;border-radius:0 6px 6px 0;margin:16px 0}
+  .callout.warn{border-color:var(--warn);background:#fbf4ea}
+  .toc{background:var(--panel);border-radius:8px;padding:14px 22px;columns:2;column-gap:32px;font-size:.92rem}
+  .toc ol{margin:0;padding-left:18px}
+  .toc a{color:var(--ink);text-decoration:none}
+  figure{margin:18px 0 24px}
+  figcaption{color:var(--muted);font-size:.85rem;margin-top:6px}
+  svg{width:100%;height:auto;display:block}
+  .pill{display:inline-block;font-size:.75rem;padding:1px 8px;border-radius:99px;background:#e3eefb;color:var(--accent2);font-weight:600}
+  .rec{background:#e6f4ee;color:var(--accent)}
+  @page{size:A4;margin:16mm 14mm}
+  @media print{
+    html{font-size:12.5px}
+    main{padding:0;max-width:none}
+    h2{break-after:avoid}
+    figure,table,pre,.callout{break-inside:avoid}
+    .pagebreak{break-before:page}
+    a{color:inherit;text-decoration:none}
+  }
+</style>
+</head>
+<body>
+<main>
+
+<header class="cover">
+  <div class="kicker">System Design Document · v0.1 Draft</div>
+  <h1>Vehicle Tracker Platform</h1>
+  <div class="meta">Java backend · Multi-protocol GPS ingestion · Real-time WebSocket distribution · Web management console<br>
+  Author: Serkan Yücel · Date: 6 November 2026 · Status: For review</div>
+</header>
+
+<nav class="toc">
+<ol>
+  <li><a href="#summary">Executive summary</a></li>
+  <li><a href="#scope">Goals, scope &amp; requirements</a></li>
+  <li><a href="#protocols">The 200+ protocol problem</a></li>
+  <li><a href="#arch">High-level architecture</a></li>
+  <li><a href="#components">Component design</a></li>
+  <li><a href="#flow">Data flow</a></li>
+  <li><a href="#ws">Real-time WebSocket contract</a></li>
+  <li><a href="#api">REST API surface</a></li>
+  <li><a href="#data">Data model &amp; storage</a></li>
+  <li><a href="#webapp">Management web application</a></li>
+  <li><a href="#security">Security</a></li>
+  <li><a href="#scale">Scalability &amp; capacity</a></li>
+  <li><a href="#ops">Deployment &amp; operations</a></li>
+  <li><a href="#stack">Technology stack</a></li>
+  <li><a href="#risks">Risks &amp; open questions</a></li>
+</ol>
+</nav>
+
+<!-- 1 -->
+<h2 id="summary">1. Executive summary</h2>
+<p>Vehicles are fitted with third-party GPS tracker devices. Each device opens a TCP or UDP connection to our backend and periodically sends location reports in its vendor's protocol. The backend decodes every report into one normalised <em>Position</em> record, stores it, and pushes it in real time over WebSocket to every authenticated management client that is allowed to see that vehicle. The management application is a browser app: users sign in and watch their fleet move live on a map, with the map provider swappable.</p>
+<div class="callout"><strong>Key decision:</strong> we will not write 200+ protocol decoders ourselves. The open-source <strong>Traccar</strong> server (Java, Apache 2.0) already ships decoders for 200+ protocols and 2,000+ device models. We embed it as a stateless <strong>Ingestion Gateway</strong> whose only job is <em>bytes in → normalised Position out</em>, published to Kafka. Everything downstream (business logic, storage, real-time push, auth, UI) is our own code and does not depend on Traccar internals.</div>
+
+<!-- 2 -->
+<h2 id="scope">2. Goals, scope &amp; requirements</h2>
+<h3>2.1 Functional requirements</h3>
+<table>
+<tr><th>ID</th><th>Requirement</th><th>Phase</th></tr>
+<tr><td>F1</td><td>Accept connections from tracker devices over TCP and UDP using any of the 200+ supported GPS protocols.</td><td>MVP</td></tr>
+<tr><td>F2</td><td>Identify each device (IMEI / unique ID) and map it to a registered vehicle; reject or quarantine unknown devices.</td><td>MVP</td></tr>
+<tr><td>F3</td><td>Normalise every report to one Position schema (time, lat, lon, speed, heading, altitude, satellites, ignition, attributes).</td><td>MVP</td></tr>
+<tr><td>F4</td><td>Publish positions to connected management clients via WebSocket within ~1 s of receipt.</td><td>MVP</td></tr>
+<tr><td>F5</td><td>Users authenticate before any access; they see only vehicles in their organisation / group.</td><td>MVP</td></tr>
+<tr><td>F6</td><td>Display live vehicles on a map; map provider is pluggable (OpenStreetMap, Google, Mapbox, Bing, HERE …).</td><td>MVP</td></tr>
+<tr><td>F7</td><td>Manage vehicles, devices, users, groups via the web app.</td><td>MVP</td></tr>
+<tr><td>F8</td><td>Persist position history; replay a vehicle's route for a time range.</td><td>v1</td></tr>
+<tr><td>F9</td><td>Events &amp; alerts: online/offline, ignition, overspeed, geofence enter/exit, SOS.</td><td>v1</td></tr>
+<tr><td>F10</td><td>Send commands to devices (e.g. engine stop, set interval) where the protocol supports it.</td><td>v2</td></tr>
+<tr><td>F11</td><td>Reports (trips, stops, mileage), public REST API &amp; webhooks for integrators.</td><td>v2</td></tr>
+</table>
+
+<h3>2.2 Non-functional requirements</h3>
+<table>
+<tr><th>Quality</th><th>Target (initial)</th></tr>
+<tr><td>Scale</td><td>Design for 100,000 concurrent devices; launch sized for 10,000. Horizontal scaling for every tier.</td></tr>
+<tr><td>Latency</td><td>Device packet → browser marker update: p95 &lt; 1 s (excluding the device's own reporting interval).</td></tr>
+<tr><td>Availability</td><td>99.9 % for ingestion and live view. No single point of failure.</td></tr>
+<tr><td>Durability</td><td>No acknowledged position is lost. Devices are ACKed only after the event is written to Kafka.</td></tr>
+<tr><td>Security</td><td>OIDC authentication, tenant isolation, TLS for all client traffic, audit log of admin actions.</td></tr>
+<tr><td>Retention</td><td>Raw positions 12 months (configurable per tenant); downsampled history longer.</td></tr>
+<tr><td>Extensibility</td><td>New protocol support by upgrading the gateway dependency, without touching other services.</td></tr>
+</table>
+
+<h3>2.3 Out of scope (for now)</h3>
+<ul>
+  <li>Native mobile apps (the web app will be responsive; a mobile app can come later on the same APIs).</li>
+  <li>Building our own hardware or firmware.</li>
+  <li>Video telematics / dashcam streams (protocol family is different; revisit in a later phase).</li>
+</ul>
+
+<!-- 3 -->
+<h2 id="protocols">3. The 200+ protocol problem</h2>
+<p>Tracker vendors each define their own wire format: binary (Teltonika Codec 8/8E, Concox/GT06, Queclink), ASCII (TK103, Meitrack, NMEA-like), HTTP-based (OsmAnd), and many variants of each. Every protocol has its own framing, login handshake, checksum, ACK rules, and set of extra attributes (fuel, CAN bus, temperature, RFID driver ID). Writing and maintaining 200 of these is years of work and requires physical test devices.</p>
+
+<h3>3.1 Options considered</h3>
+<table>
+<tr><th>Option</th><th>Description</th><th>Pros</th><th>Cons</th></tr>
+<tr><td><strong>A. Write our own decoders</strong></td><td>Netty server + hand-written decoder per protocol.</td><td>Full control, no external code.</td><td>Years to reach 200 protocols; huge test burden. Not realistic.</td></tr>
+<tr><td><strong>B. Run Traccar as the whole product</strong></td><td>Deploy stock Traccar, customise its web UI.</td><td>Fastest start; feature-rich.</td><td>Monolith with its own data model, auth, UI; hard to scale horizontally or differentiate; we inherit its architecture.</td></tr>
+<tr><td><strong>C. Traccar as Ingestion Gateway</strong> <span class="pill rec">Recommended</span></td><td>Use Traccar only for protocol decoding. Forward each decoded position to Kafka. Our own services do the rest.</td><td>200+ protocols on day one; clean separation; our services scale independently; upgrades bring new protocols.</td><td>Must manage the boundary carefully (version pinning, mapping its Position model to ours, command downlink path).</td></tr>
+</table>
+
+<h3>3.2 How the gateway works (option C)</h3>
+<ul>
+  <li>Traccar runs one Netty pipeline per protocol, each listening on its own port (e.g. 5023 for GT06, 5027 for Teltonika). Devices are configured with our host and the port of their protocol.</li>
+  <li>When the protocol is unknown, a device can still be identified using Traccar's tooling against captured packets; ops then assign it to the right port.</li>
+  <li>The gateway runs <em>stateless with respect to business data</em>: device identity is checked against a cache fed from our Device Registry; it does not own users, vehicles or history.</li>
+  <li>Decoded positions are published to Kafka. Two integration paths, decided in a spike (see §15):
+    <ol>
+      <li><strong>Configuration-only:</strong> use Traccar's built-in position/event forwarding (it supports several forwarding targets, including message brokers, in recent versions — to be verified against the pinned version).</li>
+      <li><strong>Thin fork / extension:</strong> depend on Traccar's protocol module and add our own Netty handler at the end of the pipeline that maps <code>Position</code> → our Avro/Protobuf schema and produces to Kafka synchronously before the device is ACKed. This gives us the durability guarantee in §2.2.</li>
+    </ol>
+  </li>
+  <li>Licence: Apache 2.0 allows commercial use and modification; we must keep the licence and NOTICE files and mark modified files.</li>
+</ul>
+
+<!-- 4 -->
+<h2 id="arch" class="pagebreak">4. High-level architecture</h2>
+<figure>
+<svg viewBox="0 0 1000 600" xmlns="http://www.w3.org/2000/svg" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif">
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#4a5563"/>
+    </marker>
+    <marker id="arB" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#1f5fa8"/>
+    </marker>
+  </defs>
+  <style>
+    .box{fill:#f5f7fa;stroke:#9aa5b1;stroke-width:1.2;rx:8}
+    .ours{fill:#e8f3ee;stroke:#0b6e4f}
+    .ext{fill:#fdf3e4;stroke:#c88a2c}
+    .store{fill:#eaf1fb;stroke:#1f5fa8}
+    .t{font-size:14px;font-weight:600;fill:#1b2430}
+    .s{font-size:11.5px;fill:#5b6675}
+    .ln{stroke:#4a5563;stroke-width:1.5;fill:none}
+    .lb{stroke:#1f5fa8;stroke-width:1.5;fill:none}
+    .dash{stroke-dasharray:5 4}
+    .lab{font-size:11px;fill:#4a5563}
+    .zone{fill:none;stroke:#c3cad3;stroke-dasharray:4 4}
+    .zt{font-size:11px;fill:#8a94a1;letter-spacing:.08em}
+  </style>
+
+  <!-- zones -->
+  <rect class="zone" x="10" y="20" width="320" height="330" rx="10"/>
+  <text class="zt" x="22" y="38">EDGE / INGESTION</text>
+  <rect class="zone" x="345" y="20" width="645" height="330" rx="10"/>
+  <text class="zt" x="357" y="38">STREAM PROCESSING &amp; STORAGE</text>
+  <rect class="zone" x="10" y="365" width="980" height="225" rx="10"/>
+  <text class="zt" x="22" y="383">CLIENT-FACING SERVICES</text>
+
+  <!-- devices -->
+  <rect class="box" x="25" y="60" width="120" height="270" rx="8"/>
+  <text class="t" x="85" y="90" text-anchor="middle">Tracker</text>
+  <text class="t" x="85" y="108" text-anchor="middle">devices</text>
+  <g font-size="22" text-anchor="middle"><text x="85" y="150">🚚</text><text x="85" y="190">🚗</text><text x="85" y="230">🚌</text></g>
+  <text class="s" x="85" y="270" text-anchor="middle">200+ protocols</text>
+  <text class="s" x="85" y="286" text-anchor="middle">TCP / UDP</text>
+  <text class="s" x="85" y="302" text-anchor="middle">over 2G/4G/LTE-M</text>
+
+  <!-- LB -->
+  <rect class="box" x="165" y="140" width="70" height="110" rx="8"/>
+  <text class="t" x="200" y="180" text-anchor="middle">L4</text>
+  <text class="t" x="200" y="198" text-anchor="middle">LB</text>
+  <text class="s" x="200" y="218" text-anchor="middle">port range</text>
+
+  <!-- gateway -->
+  <rect class="box ext" x="250" y="110" width="70" height="170" rx="8"/>
+  <text class="t" x="285" y="160" text-anchor="middle" font-size="12.5">Ingest</text>
+  <text class="t" x="285" y="176" text-anchor="middle" font-size="12.5">Gateway</text>
+  <text class="s" x="285" y="200" text-anchor="middle">Netty +</text>
+  <text class="s" x="285" y="214" text-anchor="middle">Traccar</text>
+  <text class="s" x="285" y="228" text-anchor="middle">decoders</text>
+  <text class="s" x="285" y="252" text-anchor="middle">× N pods</text>
+
+  <!-- kafka -->
+  <rect class="box store" x="370" y="110" width="140" height="170" rx="8"/>
+  <text class="t" x="440" y="140" text-anchor="middle">Kafka</text>
+  <text class="s" x="440" y="170" text-anchor="middle">positions.raw</text>
+  <text class="s" x="440" y="188" text-anchor="middle">positions.enriched</text>
+  <text class="s" x="440" y="206" text-anchor="middle">events</text>
+  <text class="s" x="440" y="224" text-anchor="middle">device.commands</text>
+  <text class="s" x="440" y="242" text-anchor="middle">device.status</text>
+  <text class="s" x="440" y="264" text-anchor="middle">key = deviceId</text>
+
+  <!-- processor -->
+  <rect class="box ours" x="555" y="55" width="170" height="70" rx="8"/>
+  <text class="t" x="640" y="84" text-anchor="middle">Position Processor</text>
+  <text class="s" x="640" y="104" text-anchor="middle">validate · dedupe · enrich</text>
+
+  <!-- writer -->
+  <rect class="box ours" x="555" y="160" width="170" height="70" rx="8"/>
+  <text class="t" x="640" y="189" text-anchor="middle">History Writer</text>
+  <text class="s" x="640" y="209" text-anchor="middle">batched inserts</text>
+
+  <!-- live hub -->
+  <rect class="box ours" x="555" y="265" width="170" height="70" rx="8"/>
+  <text class="t" x="640" y="294" text-anchor="middle">Live Hub</text>
+  <text class="s" x="640" y="314" text-anchor="middle">WebSocket fan-out</text>
+
+  <!-- timescale -->
+  <rect class="box store" x="770" y="140" width="200" height="110" rx="8"/>
+  <text class="t" x="870" y="172" text-anchor="middle">PostgreSQL</text>
+  <text class="s" x="870" y="192" text-anchor="middle">+ TimescaleDB (history)</text>
+  <text class="s" x="870" y="208" text-anchor="middle">+ PostGIS (geofences)</text>
+  <text class="s" x="870" y="224" text-anchor="middle">+ core relational data</text>
+
+  <!-- redis -->
+  <rect class="box store" x="770" y="270" width="200" height="65" rx="8"/>
+  <text class="t" x="870" y="296" text-anchor="middle">Redis</text>
+  <text class="s" x="870" y="316" text-anchor="middle">last position · sessions · pub/sub</text>
+
+  <!-- client side -->
+  <rect class="box ours" x="40" y="420" width="190" height="130" rx="8"/>
+  <text class="t" x="135" y="452" text-anchor="middle">Management Web App</text>
+  <text class="s" x="135" y="474" text-anchor="middle">React + TypeScript</text>
+  <text class="s" x="135" y="490" text-anchor="middle">MapLibre / map adapters</text>
+  <text class="s" x="135" y="506" text-anchor="middle">OSM · Google · Mapbox</text>
+  <text class="s" x="135" y="530" text-anchor="middle">browser</text>
+
+  <rect class="box" x="300" y="420" width="140" height="130" rx="8"/>
+  <text class="t" x="370" y="452" text-anchor="middle">API Gateway</text>
+  <text class="s" x="370" y="474" text-anchor="middle">TLS · routing</text>
+  <text class="s" x="370" y="490" text-anchor="middle">rate limiting</text>
+  <text class="s" x="370" y="506" text-anchor="middle">JWT check</text>
+
+  <rect class="box ours" x="510" y="420" width="180" height="130" rx="8"/>
+  <text class="t" x="600" y="452" text-anchor="middle">Core API</text>
+  <text class="s" x="600" y="474" text-anchor="middle">Spring Boot REST</text>
+  <text class="s" x="600" y="490" text-anchor="middle">tenants · users · vehicles</text>
+  <text class="s" x="600" y="506" text-anchor="middle">devices · history · commands</text>
+  <text class="s" x="600" y="522" text-anchor="middle">Device Registry</text>
+
+  <rect class="box ext" x="770" y="420" width="200" height="130" rx="8"/>
+  <text class="t" x="870" y="452" text-anchor="middle">Identity Provider</text>
+  <text class="s" x="870" y="474" text-anchor="middle">Keycloak (OIDC / OAuth2)</text>
+  <text class="s" x="870" y="490" text-anchor="middle">SSO · MFA · roles</text>
+
+  <!-- arrows: devices -> lb -> gateway -> kafka -->
+  <path class="ln" d="M145,195 H163" marker-end="url(#ar)"/>
+  <path class="ln" d="M235,195 H248" marker-end="url(#ar)"/>
+  <path class="ln" d="M320,170 H368" marker-end="url(#ar)"/>
+  <text class="lab" x="326" y="162">publish</text>
+  <path class="ln dash" d="M368,235 H322" marker-end="url(#ar)"/>
+  <text class="lab" x="324" y="252">cmds</text>
+
+  <!-- kafka <-> processor -->
+  <path class="ln" d="M510,130 C530,130 530,80 553,80" marker-end="url(#ar)"/>
+  <path class="ln" d="M555,100 C535,100 535,150 512,150" marker-end="url(#ar)"/>
+  <!-- kafka -> writer -->
+  <path class="ln" d="M510,195 H553" marker-end="url(#ar)"/>
+  <!-- kafka -> live -->
+  <path class="ln" d="M510,255 C530,255 530,300 553,300" marker-end="url(#ar)"/>
+  <!-- writer -> db -->
+  <path class="ln" d="M725,195 H768" marker-end="url(#ar)"/>
+  <!-- processor -> redis/db (geofence lookups) -->
+  <path class="ln dash" d="M725,90 C760,90 760,150 790,150" marker-end="url(#ar)"/>
+  <!-- live <-> redis -->
+  <path class="ln" d="M725,302 H768" marker-end="url(#ar)" marker-start="url(#ar)"/>
+
+  <!-- live hub -> web app (websocket) -->
+  <path class="lb" d="M555,320 C420,360 240,370 180,418" marker-end="url(#arB)"/>
+  <text class="lab" x="300" y="372" fill="#1f5fa8" style="fill:#1f5fa8;font-weight:600">WebSocket (wss) · live positions</text>
+
+  <!-- web app -> api gw -> core api -->
+  <path class="ln" d="M230,485 H298" marker-end="url(#ar)" marker-start="url(#ar)"/>
+  <text class="lab" x="238" y="477">REST</text>
+  <path class="ln" d="M440,485 H508" marker-end="url(#ar)" marker-start="url(#ar)"/>
+  <!-- core api -> idp -->
+  <path class="ln" d="M690,485 H768" marker-end="url(#ar)"/>
+  <text class="lab" x="700" y="477">JWKS / admin</text>
+  <!-- core api -> db -->
+  <path class="ln" d="M650,420 C700,380 760,300 820,252" marker-end="url(#ar)"/>
+  <!-- core api -> kafka commands -->
+  <path class="ln dash" d="M560,420 C540,370 470,330 450,282" marker-end="url(#ar)"/>
+  <text class="lab" x="478" y="398">commands</text>
+  <!-- web app -> idp login -->
+  <path class="ln dash" d="M135,550 C135,585 870,585 870,552" marker-end="url(#ar)"/>
+  <text class="lab" x="470" y="569">OIDC login (Authorization Code + PKCE)</text>
+</svg>
+<figcaption>Figure 1 — Logical architecture. Green = services we build; amber = adopted open-source components; blue = data infrastructure. Dashed lines = control/secondary paths.</figcaption>
+</figure>
+
+<p>The design is event-driven around Kafka. The ingestion tier is deliberately thin and replaceable; Kafka decouples the bursty, connection-heavy device side from the client side. Every service is stateless and horizontally scalable; state lives in Kafka, PostgreSQL and Redis.</p>
+
+<!-- 5 -->
+<h2 id="components">5. Component design</h2>
+
+<h3>5.1 Ingestion Gateway (Traccar-based)</h3>
+<ul>
+  <li><strong>Responsibility:</strong> hold long-lived device connections, run protocol decoders, send protocol-level ACKs, publish normalised positions, deliver downlink commands to connected devices.</li>
+  <li><strong>Device identity:</strong> the unique ID from the login/first packet is looked up in a local cache (Caffeine) loaded from the Device Registry (Core API) and kept in sync via the <code>device.registry</code> Kafka topic. Unknown IDs are published to <code>device.unknown</code> for ops review instead of being silently dropped.</li>
+  <li><strong>Session ownership:</strong> on connect, the gateway writes <code>deviceId → podId</code> to Redis (TTL refreshed on traffic) so command delivery can be routed to the right pod.</li>
+  <li><strong>Durability:</strong> Kafka producer with <code>acks=all</code>, idempotence on; device ACK is sent only after the produce completes. If Kafka is unreachable, the gateway stops ACKing and devices buffer locally (most trackers store hundreds to thousands of points).</li>
+  <li><strong>Scaling:</strong> N identical pods behind a Layer-4 load balancer. TCP connections are sticky by nature; UDP protocols need source-IP affinity.</li>
+</ul>
+
+<h3>5.2 Position Processor</h3>
+<ul>
+  <li>Kafka Streams (or Spring Kafka consumers) reading <code>positions.raw</code>, partitioned by <code>deviceId</code> so each device's points are processed in order.</li>
+  <li><strong>Validate:</strong> drop invalid fixes (lat/lon 0,0, no GPS fix, future timestamps), flag outliers (impossible jumps by speed).</li>
+  <li><strong>Dedupe:</strong> devices resend buffered points after reconnecting; dedupe by <code>(deviceId, fixTime)</code>.</li>
+  <li><strong>Enrich:</strong> attach <code>vehicleId</code>, <code>tenantId</code>, <code>groupIds</code>; compute derived fields (odometer delta, moving/stopped state).</li>
+  <li><strong>Events (v1):</strong> online/offline, ignition on/off, overspeed, geofence enter/exit (PostGIS geometries cached in memory), alarms from device attributes. Output to <code>events</code>.</li>
+  <li>Writes <code>positions.enriched</code>; late/historical points (buffered offline data) are marked <code>historical=true</code> so the live map does not jump back in time.</li>
+</ul>
+
+<h3>5.3 History Writer</h3>
+<ul>
+  <li>Consumes <code>positions.enriched</code> and <code>events</code>, writes in batches (e.g. 500 rows / 200 ms) to TimescaleDB using COPY or batched inserts.</li>
+  <li>Idempotent upserts on <code>(device_id, fix_time)</code> so reprocessing is safe.</li>
+</ul>
+
+<h3>5.4 Live Hub (WebSocket service)</h3>
+<ul>
+  <li>Spring Boot with Spring WebSocket (STOMP over WebSocket, or raw WebSocket with a small JSON protocol — see §7). Reactive (WebFlux/Netty) for high connection counts.</li>
+  <li>Each pod consumes <code>positions.enriched</code> and <code>events</code> with its <em>own</em> consumer group (broadcast) and forwards only to its locally connected sessions whose authorisation scope includes the vehicle. Alternative at larger scale: a router publishes to Redis channels per tenant and pods subscribe only to tenants they hold sessions for.</li>
+  <li><strong>Snapshot on connect:</strong> on subscribe, the client receives the last known position of every visible vehicle from Redis, then incremental updates.</li>
+  <li><strong>Back-pressure:</strong> per-session bounded queue; if a slow client falls behind, older updates for the same vehicle are coalesced (only the latest matters for a live map).</li>
+  <li><strong>Optional viewport filtering:</strong> clients may send their map bounds; the hub only sends vehicles inside the box (+ margin). Important for tenants with tens of thousands of vehicles.</li>
+</ul>
+
+<h3>5.5 Core API</h3>
+<ul>
+  <li>Spring Boot 3 REST service (Spring MVC, Spring Security as OAuth2 Resource Server).</li>
+  <li>Owns tenants, users (profile; credentials live in the IdP), roles, groups, vehicles, devices (Device Registry), geofences, history queries, command requests, audit log.</li>
+  <li>Publishes registry changes to <code>device.registry</code> for gateway caches; publishes command requests to <code>device.commands</code>.</li>
+</ul>
+
+<h3>5.6 Identity Provider</h3>
+<ul>
+  <li>Keycloak (or a managed OIDC provider: Auth0, Entra ID, Cognito). Supports SSO for enterprise customers, MFA, password policy.</li>
+  <li>Access token (JWT, ~5 min) carries <code>sub</code>, <code>tenant_id</code>, roles. Fine-grained group access is resolved by Core API / Live Hub and cached.</li>
+</ul>
+
+<!-- 6 -->
+<h2 id="flow">6. Data flow</h2>
+<h3>6.1 Uplink: device report → live map</h3>
+<table>
+<tr><th>#</th><th>Step</th><th>Component</th></tr>
+<tr><td>1</td><td>Device connects to <code>track.example.com:5027</code> and sends login + location packet.</td><td>Device → L4 LB</td></tr>
+<tr><td>2</td><td>Protocol decoder frames and decodes packet; unique ID resolved against the registry cache.</td><td>Ingestion Gateway</td></tr>
+<tr><td>3</td><td>Normalised Position produced to <code>positions.raw</code> (key = deviceId, acks=all).</td><td>Gateway → Kafka</td></tr>
+<tr><td>4</td><td>Protocol ACK returned to device.</td><td>Gateway → Device</td></tr>
+<tr><td>5</td><td>Validate, dedupe, enrich with vehicle/tenant; derive events; produce to <code>positions.enriched</code>.</td><td>Position Processor</td></tr>
+<tr><td>6a</td><td>Batch-written to TimescaleDB.</td><td>History Writer</td></tr>
+<tr><td>6b</td><td>Last-known position updated in Redis; pushed to authorised WebSocket sessions.</td><td>Live Hub</td></tr>
+<tr><td>7</td><td>Browser moves marker (with smooth interpolation), updates side panel.</td><td>Web App</td></tr>
+</table>
+
+<h3>6.2 Downlink: user command → device (v2)</h3>
+<ol>
+  <li>User clicks “Request position” / “Immobilise” → <code>POST /api/v1/devices/{id}/commands</code> (permission check, audit log, optional 2-step confirmation for dangerous commands).</li>
+  <li>Core API writes the command (status <em>PENDING</em>) and produces to <code>device.commands</code>.</li>
+  <li>The gateway pod that owns the session (looked up in Redis, or all pods filter by deviceId) encodes it in the device's protocol and sends it. If the device is offline, the command is queued until it reconnects (or expires).</li>
+  <li>Device response → <code>device.status</code> → Core API updates status → Live Hub notifies the user.</li>
+</ol>
+
+<!-- 7 -->
+<h2 id="ws">7. Real-time WebSocket contract</h2>
+<p>Endpoint: <code>wss://app.example.com/ws/live</code>. The access token is sent in the first message (not in the URL, to keep it out of logs). The server closes the socket when the token expires unless a refreshed token is sent.</p>
+<pre><code>// client → server
+{ "type": "auth", "token": "&lt;JWT&gt;" }
+{ "type": "subscribe", "scope": { "groups": ["g-12"], "vehicles": [] },
+  "bounds": { "n": 51.70, "s": 51.28, "e": 0.33, "w": -0.51 } }   // bounds optional
+{ "type": "bounds", "n": 51.6, "s": 51.4, "e": 0.1, "w": -0.3 }
+{ "type": "ping" }
+
+// server → client
+{ "type": "snapshot", "positions": [ { ...position... }, ... ] }
+{ "type": "position",
+  "vehicleId": "v-8812", "deviceId": "d-3391",
+  "fixTime": "2026-11-06T18:27:04Z", "serverTime": "2026-11-06T18:27:05.112Z",
+  "lat": 51.50735, "lon": -0.12776, "speedKph": 42.5, "course": 118,
+  "altitude": 21, "satellites": 11, "valid": true,
+  "ignition": true, "motion": true,
+  "attributes": { "fuelPct": 63, "batteryV": 12.6, "odometerKm": 48211.4 } }
+{ "type": "event", "vehicleId": "v-8812", "kind": "GEOFENCE_EXIT",
+  "time": "2026-11-06T18:27:04Z", "data": { "geofenceId": "gf-7" } }
+{ "type": "status", "vehicleId": "v-8812", "online": false, "lastSeen": "..." }
+{ "type": "pong" }</code></pre>
+<p>Positions are compact JSON initially; if bandwidth matters at scale, switch to a binary encoding (e.g. Protobuf / MessagePack) negotiated via WebSocket sub-protocol without changing message semantics.</p>
+
+<!-- 8 -->
+<h2 id="api">8. REST API surface (Core API, v1)</h2>
+<table>
+<tr><th>Resource</th><th>Endpoints</th></tr>
+<tr><td>Session / me</td><td><code>GET /api/v1/me</code> — profile, tenant, roles, preferences (incl. preferred map provider)</td></tr>
+<tr><td>Vehicles</td><td><code>GET/POST /vehicles</code>, <code>GET/PUT/DELETE /vehicles/{id}</code></td></tr>
+<tr><td>Devices</td><td><code>GET/POST /devices</code>, <code>PUT /devices/{id}</code>, <code>POST /devices/{id}/assign</code> (to vehicle), <code>GET /devices/unknown</code></td></tr>
+<tr><td>Positions</td><td><code>GET /vehicles/{id}/positions?from=&amp;to=&amp;simplify=</code> (history, paged), <code>GET /positions/latest?group=</code></td></tr>
+<tr><td>Groups &amp; users</td><td><code>/groups</code>, <code>/users</code>, <code>/users/{id}/roles</code></td></tr>
+<tr><td>Geofences (v1)</td><td><code>/geofences</code> (GeoJSON in/out)</td></tr>
+<tr><td>Events (v1)</td><td><code>GET /events?vehicle=&amp;type=&amp;from=&amp;to=</code></td></tr>
+<tr><td>Commands (v2)</td><td><code>POST /devices/{id}/commands</code>, <code>GET /devices/{id}/commands</code></td></tr>
+<tr><td>Protocols</td><td><code>GET /protocols</code> — supported protocols, their ports, models (for device onboarding UI)</td></tr>
+</table>
+<p>Documented with OpenAPI 3 (springdoc); the web app's TypeScript client is generated from it.</p>
+
+<!-- 9 -->
+<h2 id="data" class="pagebreak">9. Data model &amp; storage</h2>
+<h3>9.1 Core entities (PostgreSQL)</h3>
+<pre><code>tenant          (id, name, plan, retention_days, created_at)
+app_user        (id, tenant_id, idp_subject, email, name, locale, map_provider, created_at)
+user_group      (id, tenant_id, name)
+user_group_member (group_id, user_id, role)          -- role: VIEWER | DISPATCHER | ADMIN
+vehicle         (id, tenant_id, name, plate, vin, type, icon, group_id, created_at)
+device          (id, tenant_id, unique_id /*IMEI*/, protocol, model, phone, sim_iccid,
+                 status, last_seen_at, created_at)    -- UNIQUE(unique_id)
+device_assignment (device_id, vehicle_id, from_ts, to_ts)   -- device swaps keep history
+geofence        (id, tenant_id, name, area geography, created_at)
+command         (id, device_id, type, payload jsonb, status, requested_by, created_at, updated_at)
+audit_log       (id, tenant_id, user_id, action, entity, entity_id, data jsonb, at)</code></pre>
+
+<h3>9.2 Time-series (TimescaleDB hypertable)</h3>
+<pre><code>position (
+  device_id   uuid        not null,
+  vehicle_id  uuid,
+  tenant_id   uuid        not null,
+  fix_time    timestamptz not null,
+  server_time timestamptz not null,
+  lat double precision, lon double precision,
+  speed_kph real, course smallint, altitude real, satellites smallint,
+  valid boolean, ignition boolean,
+  attributes  jsonb,
+  primary key (device_id, fix_time)
+)  -- hypertable on fix_time, 1-day chunks; compression after 7 days;
+   -- retention policy per tenant; continuous aggregate for 1-minute downsampling.</code></pre>
+<p><strong>Volume estimate:</strong> 10,000 vehicles × one point every 10 s while moving (~10 h/day) ≈ 36 M rows/day. At ~150 bytes/row uncompressed ≈ 5.4 GB/day; TimescaleDB compression typically cuts this by an order of magnitude. At 100k vehicles, consider a dedicated time-series cluster or ClickHouse for history.</p>
+
+<h3>9.3 Redis keys</h3>
+<table>
+<tr><th>Key</th><th>Value</th><th>Purpose</th></tr>
+<tr><td><code>pos:last:{vehicleId}</code></td><td>Position JSON</td><td>Snapshot on connect; latest-positions API</td></tr>
+<tr><td><code>tenant:{id}:vehicles</code></td><td>GEO set</td><td>Fast viewport queries (<code>GEOSEARCH</code>)</td></tr>
+<tr><td><code>session:{deviceId}</code></td><td>gateway pod id (TTL)</td><td>Command routing</td></tr>
+<tr><td><code>authz:{userId}</code></td><td>visible vehicle/group ids (TTL)</td><td>Live Hub authorisation cache</td></tr>
+</table>
+
+<!-- 10 -->
+<h2 id="webapp">10. Management web application</h2>
+<h3>10.1 Stack</h3>
+<ul>
+  <li>React + TypeScript, Vite build, served as static assets from CDN / object storage.</li>
+  <li>Auth: OIDC Authorization Code + PKCE (e.g. <code>oidc-client-ts</code>); tokens in memory, silent refresh.</li>
+  <li>State: TanStack Query for REST data; a dedicated live store (Zustand) fed by the WebSocket client.</li>
+  <li>UI components: a mature component library (e.g. MUI or Mantine) for admin screens.</li>
+</ul>
+
+<h3>10.2 “Any map” — map abstraction</h3>
+<p>The UI talks to a small <code>MapAdapter</code> interface, not to a vendor SDK directly:</p>
+<pre><code>interface MapAdapter {
+  mount(el: HTMLElement, opts: { center: LatLng; zoom: number }): void;
+  upsertMarker(id: string, p: LatLng, style: MarkerStyle): void;
+  removeMarker(id: string): void;
+  drawTrack(id: string, points: LatLng[], style: LineStyle): void;
+  fitBounds(b: Bounds): void;
+  onBoundsChange(cb: (b: Bounds) =&gt; void): void;
+  destroy(): void;
+}</code></pre>
+<ul>
+  <li><strong>Default adapter: MapLibre GL JS</strong> (open source, WebGL, handles thousands of markers via GeoJSON sources/clustering). With raster/vector tile sources it covers OpenStreetMap, MapTiler, Mapbox styles, Esri, HERE tiles, etc.</li>
+  <li>Additional adapters for providers that require their own SDK: <strong>Google Maps JS API</strong>, optionally Leaflet for lightweight/legacy needs.</li>
+  <li>Provider choice: tenant default + user preference; API keys per tenant are stored server-side and delivered via <code>/me</code>.</li>
+  <li>Marker animation: interpolate between consecutive positions over the reporting interval so movement looks smooth; rotate icon by course.</li>
+</ul>
+
+<h3>10.3 Screens (MVP → v1)</h3>
+<table>
+<tr><th>Screen</th><th>Contents</th></tr>
+<tr><td>Login</td><td>Redirect to IdP; tenant branding.</td></tr>
+<tr><td>Live map</td><td>Full-screen map, vehicle list with search/filter (group, status, moving/stopped/offline), click vehicle → details card (speed, last update, address, driver, attributes), follow mode, clustering.</td></tr>
+<tr><td>Vehicle history (v1)</td><td>Date-range picker, route polyline, playback slider, stops and events on the timeline.</td></tr>
+<tr><td>Vehicles / Devices</td><td>CRUD, device onboarding wizard (choose model → shows server host/port to configure), assignment to vehicle, unknown-device inbox.</td></tr>
+<tr><td>Users &amp; groups</td><td>Invite users, assign roles and vehicle groups.</td></tr>
+<tr><td>Geofences &amp; alerts (v1)</td><td>Draw polygons/circles; alert rules; notification channels.</td></tr>
+</table>
+
+<!-- 11 -->
+<h2 id="security">11. Security</h2>
+<table>
+<tr><th>Area</th><th>Measures</th></tr>
+<tr><td>User access</td><td>OIDC; short-lived JWT; refresh via IdP; MFA for admins; RBAC (Viewer, Dispatcher, Admin, Super-admin).</td></tr>
+<tr><td>Tenant isolation</td><td>Every row carries <code>tenant_id</code>; enforced in the repository layer and optionally PostgreSQL Row-Level Security; Live Hub filters on server side — never trusts client scope.</td></tr>
+<tr><td>Device channel</td><td>Most GPS protocols are unauthenticated plaintext. Mitigations: only registered unique IDs accepted; anomaly detection (same IMEI from two IPs, impossible jumps); TLS ports for devices that support it; private APN / VPN with mobile operator for high-security customers.</td></tr>
+<tr><td>Transport</td><td>TLS 1.2+ for all web/API/WebSocket traffic; WebSocket origin check; token in first message, not URL.</td></tr>
+<tr><td>Commands</td><td>Dangerous commands (immobiliser) need ADMIN role, confirmation, and are fully audited.</td></tr>
+<tr><td>Abuse</td><td>Per-IP connection limits at the gateway; API rate limits; WAF in front of web endpoints.</td></tr>
+<tr><td>Privacy</td><td>Location data is personal data under UK/EU GDPR when linked to drivers: retention limits, data export/erasure per tenant, optional “private mode” for off-duty hours.</td></tr>
+</table>
+
+<!-- 12 -->
+<h2 id="scale">12. Scalability &amp; capacity</h2>
+<table>
+<tr><th></th><th>Launch (10k devices)</th><th>Target (100k devices)</th></tr>
+<tr><td>Ingest rate (avg / peak)</td><td>~1k msg/s / 5k msg/s</td><td>~10k msg/s / 50k msg/s</td></tr>
+<tr><td>Gateway pods</td><td>2–3 (≈ 10k conns each is comfortable for Netty)</td><td>10–15</td></tr>
+<tr><td>Kafka</td><td>3 brokers, 24 partitions per position topic</td><td>3–6 brokers, 96+ partitions</td></tr>
+<tr><td>Processor / Writer</td><td>2 + 2 instances</td><td>scale to partition count</td></tr>
+<tr><td>Live Hub</td><td>2 pods (thousands of sessions each)</td><td>N pods; tenant-sharded routing via Redis</td></tr>
+<tr><td>Database</td><td>1 primary + 1 replica</td><td>Primary + replicas; history possibly separate cluster</td></tr>
+</table>
+<p>Ordering is guaranteed per device by Kafka partitioning on <code>deviceId</code>. All consumers are idempotent so at-least-once delivery is safe.</p>
+
+<!-- 13 -->
+<h2 id="ops">13. Deployment &amp; operations</h2>
+<ul>
+  <li><strong>Packaging:</strong> one Docker image per service; Kubernetes (EKS/GKE/AKS or self-managed) with Helm charts. Local dev via Docker Compose (Kafka, Postgres/Timescale, Redis, Keycloak).</li>
+  <li><strong>Gateway networking:</strong> needs hundreds of ports open. Use a cloud Network Load Balancer with a port range (or a dedicated node pool with <code>hostNetwork</code> + external L4 balancer such as HAProxy). Only enable ports for protocols actually in use to reduce attack surface.</li>
+  <li><strong>Managed options:</strong> managed Kafka (MSK, Confluent, Aiven), managed Postgres with TimescaleDB (Timescale Cloud) and managed Redis reduce ops load.</li>
+  <li><strong>Observability:</strong> Micrometer → Prometheus/Grafana; OpenTelemetry tracing across services (trace id stamped at the gateway); structured JSON logs → Loki/ELK. Key metrics: connected devices per protocol, decode errors per protocol, ingest lag, Kafka consumer lag, end-to-end latency, WebSocket sessions.</li>
+  <li><strong>Raw packet capture:</strong> optional per-device hex logging (time-limited) for troubleshooting new device models.</li>
+  <li><strong>CI/CD:</strong> GitHub Actions → build, test, container scan → deploy to staging → production with canary for gateway (device connections drain gracefully).</li>
+  <li><strong>Testing:</strong> device simulators replaying recorded packets per protocol; load tests (Gatling/k6) for 100k simulated connections and WebSocket clients.</li>
+</ul>
+
+<!-- 14 -->
+<h2 id="stack">14. Technology stack</h2>
+<table>
+<tr><th>Layer</th><th>Choice</th><th>Notes</th></tr>
+<tr><td>Language / runtime</td><td>Java 21 LTS</td><td>Virtual threads for blocking I/O in REST services.</td></tr>
+<tr><td>Framework</td><td>Spring Boot 3.x</td><td>Spring Security, Spring Kafka, Spring WebSocket/WebFlux, springdoc.</td></tr>
+<tr><td>Protocol decoding</td><td>Traccar server (Apache 2.0), Netty</td><td>Pinned version; upgraded deliberately with regression tests.</td></tr>
+<tr><td>Messaging</td><td>Apache Kafka</td><td>Schemas in Avro/Protobuf with a schema registry.</td></tr>
+<tr><td>Databases</td><td>PostgreSQL + TimescaleDB + PostGIS</td><td>One engine for relational, time-series and geo initially.</td></tr>
+<tr><td>Cache / pub-sub</td><td>Redis</td><td>Last positions, GEO index, session routing.</td></tr>
+<tr><td>Identity</td><td>Keycloak (OIDC)</td><td>Or managed IdP.</td></tr>
+<tr><td>Frontend</td><td>React, TypeScript, Vite, MapLibre GL JS</td><td>Pluggable map adapters (Google, Leaflet …).</td></tr>
+<tr><td>Infra</td><td>Docker, Kubernetes, Helm, Terraform</td><td>GitHub Actions CI/CD.</td></tr>
+<tr><td>Observability</td><td>Prometheus, Grafana, OpenTelemetry, Loki</td><td></td></tr>
+</table>
+
+<!-- 15 -->
+<h2 id="risks">15. Risks &amp; open questions</h2>
+<table>
+<tr><th>Risk / question</th><th>Impact</th><th>Mitigation / next step</th></tr>
+<tr><td>Integrating Traccar as a library vs. using built-in forwarding</td><td>Durability and upgrade effort</td><td>Spike in Phase 0: prototype both, measure, decide. Keep our mapping code in a separate module.</td></tr>
+<tr><td>Upstream Traccar changes break our integration</td><td>Gateway upgrades</td><td>Pin versions; protocol regression suite with recorded packets; upgrade quarterly.</td></tr>
+<tr><td>“Supports 200+ protocols” ≠ every device variant works</td><td>Customer onboarding</td><td>Certified device list; test with real hardware for top 10 models customers use.</td></tr>
+<tr><td>Many open ports on the gateway</td><td>Security, cloud LB limits</td><td>Enable only needed ports; check cloud LB listener limits early.</td></tr>
+<tr><td>UDP protocols behind load balancers</td><td>Responses to wrong source</td><td>Source-IP affinity; test per UDP protocol.</td></tr>
+<tr><td>Live view for very large tenants</td><td>Browser performance</td><td>Viewport filtering, clustering, WebGL rendering.</td></tr>
+<tr><td>Which device models will customers use first?</td><td>Prioritises testing</td><td>Open question for product.</td></tr>
+<tr><td>Cloud vs. on-premise deployment for customers?</td><td>Packaging, licensing</td><td>Open question — affects multi-tenancy vs. single-tenant installs.</td></tr>
+<tr><td>Commercial map provider costs (Google etc.)</td><td>Running cost</td><td>Default to OSM-based tiles; premium providers per tenant with their own keys.</td></tr>
+</table>
+
+<p class="meta" style="margin-top:40px">Next document: delivery roadmap (phases, milestones, team, estimates). References: Traccar project — github.com/traccar/traccar.</p>
+
+</main>
+</body>
+</html>
