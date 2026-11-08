@@ -9,6 +9,7 @@ Real-time vehicle tracking: GPS tracker devices connect to a Java backend, which
 | Document | Format | Description |
 |---|---|---|
 | System design | [HTML](vehicle-tracker-design.html) · [PDF](vehicle-tracker-design.pdf) | Architecture, components, data flow, WebSocket/REST contracts, data model, security, scaling, risks |
+| Console mockups | [mockup/](mockup/README.md) | Clickable HTML mockups of the web app (live map with multiple vehicles, selected vehicle with driver and trip start/end, trip history, fleet admin) on Google Maps |
 | Roadmap | _coming next_ | Phases, milestones, team, estimates |
 
 See [DOCS.md](DOCS.md) for the documentation index.

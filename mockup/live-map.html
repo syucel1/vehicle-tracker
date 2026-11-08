@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Live map - Vehicle Tracker</title>
+<link rel="stylesheet" href="assets/styles.css">
+</head>
+<body>
+<main class="console">
+  <aside class="sidebar" aria-label="Vehicles">
+    <div class="sidebar-head">
+      <h1>Live map</h1>
+      <div class="sub" id="fleet-summary">Loading vehicles</div>
+      <label class="search">
+        <span class="visually-hidden">Search vehicles</span>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 3a7 7 0 0 1 5.6 11.2l5 5-1.4 1.4-5-5A7 7 0 1 1 10 3zm0 2a5 5 0 1 0 0 10 5 5 0 0 0 0-10z"/></svg>
+        <input class="input" id="search" type="search" placeholder="Search plate, vehicle or driver" autocomplete="off">
+      </label>
+      <div class="segmented" id="status-filter" role="group" aria-label="Filter by status">
+        <button type="button" data-status="all" aria-pressed="true"><b>0</b>All</button>
+        <button type="button" data-status="moving" aria-pressed="false"><b>0</b>Moving</button>
+        <button type="button" data-status="idle" aria-pressed="false"><b>0</b>Idle</button>
+        <button type="button" data-status="stopped" aria-pressed="false"><b>0</b>Stopped</button>
+        <button type="button" data-status="offline" aria-pressed="false"><b>0</b>Offline</button>
+      </div>
+      <label class="visually-hidden" for="group">Group</label>
+      <select class="select" id="group">
+        <option value="">All groups</option>
+      </select>
+    </div>
+    <ul class="list" id="vehicle-list" role="listbox" aria-label="Vehicles"></ul>
+  </aside>
+
+  <section class="map-area" aria-label="Map">
+    <div class="map" id="map"></div>
+    <div class="map-tools">
+      <button class="btn btn--sm" type="button" id="fit-all">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h6v2H6v4H4zm10 0h6v6h-2V6h-4zM4 14h2v4h4v2H4zm14 0h2v6h-6v-2h4z"/></svg>
+        Show all vehicles
+      </button>
+      <button class="btn btn--sm" type="button" id="follow" aria-pressed="false" disabled>Follow selected</button>
+      <button class="btn btn--sm" type="button" id="plates" aria-pressed="false">Plate labels</button>
+      <button class="btn btn--sm" type="button" id="traffic" aria-pressed="false" hidden>Traffic</button>
+    </div>
+  </section>
+
+  <aside class="drawer" id="drawer" aria-label="Selected vehicle"></aside>
+</main>
+
+<script src="assets/config.js"></script>
+<script src="assets/app.js"></script>
+<script src="assets/data.js"></script>
+<script src="assets/map.js"></script>
+<script>
+(function () {
+  "use strict";
+  UI.topbar("live-map.html");
+
+  const listEl = document.getElementById("vehicle-list");
+  const drawer = document.getElementById("drawer");
+  const mapEl = document.getElementById("map");
+  const state = { status: "all", group: "", q: "", selected: null, follow: false };
+  const LONDON = { lat: 51.505, lng: -0.15 };
+
+  // ----- filters -----
+  const groups = [...new Set(VT.vehicles.map(v => v.group))].sort();
+  const groupSel = document.getElementById("group");
+  groups.forEach(g => groupSel.add(new Option(g, g)));
+  groupSel.onchange = () => { state.group = groupSel.value; applyFilter(); };
+  document.getElementById("search").oninput = e => { state.q = e.target.value.trim().toLowerCase(); applyFilter(); };
+  document.querySelectorAll("#status-filter button").forEach(b => b.onclick = () => {
+    state.status = b.dataset.status;
+    document.querySelectorAll("#status-filter button").forEach(x => x.setAttribute("aria-pressed", x === b));
+    applyFilter();
+  });
+  const visible = v =>
+    (state.status === "all" || v.status === state.status) &&
+    (!state.group || v.group === state.group) &&
+    (!state.q || [v.plate, v.name, v.driver.name, v.make].join(" ").toLowerCase().includes(state.q));
+
+  // ----- list -----
+  const rows = new Map();
+  VT.vehicles.forEach(v => {
+    const li = document.createElement("li");
+    li.className = "vrow"; li.setAttribute("role", "option"); li.tabIndex = 0; li.dataset.id = v.id;
+    li.innerHTML = `
+      ${UI.plate(v.plate)}
+      <span class="name">${v.name}<span class="visually-hidden">, ${v.make}</span></span>
+      <span class="speed"></span>
+      <span class="meta"><span class="st"></span><span class="upd"></span></span>
+      <span class="meta"><span>${v.driver.name}</span><span>${v.group}</span></span>`;
+    li.onclick = () => select(v.id);
+    li.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); select(v.id); } };
+    listEl.append(li);
+    rows.set(v.id, li);
+  });
+  const empty = document.createElement("li");
+  empty.className = "list-empty"; empty.textContent = "No vehicles match these filters. Clear the search or choose another status.";
+  listEl.append(empty);
+
+  function renderList() {
+    const counts = { all: 0, moving: 0, idle: 0, stopped: 0, offline: 0 };
+    VT.vehicles.forEach(v => { counts.all++; counts[v.status]++; });
+    document.querySelectorAll("#status-filter button").forEach(b => b.querySelector("b").textContent = counts[b.dataset.status]);
+    document.getElementById("fleet-summary").textContent =
+      `${counts.all} vehicles, ${counts.moving} moving now`;
+    let shown = 0;
+    VT.vehicles.forEach(v => {
+      const li = rows.get(v.id);
+      const vis = visible(v); li.hidden = !vis; if (vis) shown++;
+      li.setAttribute("aria-selected", v.id === state.selected);
+      li.querySelector(".speed").innerHTML = v.status === "offline" ? "" : `${v.speed}<small> km/h</small>`;
+      li.querySelector(".st").innerHTML = UI.status(v.status);
+      li.querySelector(".upd").textContent = UI.ago(v.lastUpdate);
+    });
+    empty.hidden = shown > 0;
+  }
+
+  // ----- map -----
+  let view, markers = new Map(), tripLayers = [];
+  VTMap.create(mapEl, { center: LONDON, zoom: 11 }).then(v => {
+    view = v;
+    if (view.kind === "google") document.getElementById("traffic").hidden = false;
+    applyFilter(true);
+    const initial = new URLSearchParams(location.search).get("vehicle");
+    if (initial && VT.byId(initial)) select(initial); else fitAll();
+    VT.subscribe(onTick);
+  });
+
+  function applyFilter(initial) {
+    if (!view) { renderList(); return; }
+    VT.vehicles.forEach(v => {
+      const want = visible(v) || v.id === state.selected;
+      const has = markers.has(v.id);
+      if (want && !has) markers.set(v.id, view.addVehicle(v, { selected: v.id === state.selected, onClick: x => select(x.id) }));
+      if (!want && has) { markers.get(v.id).remove(); markers.delete(v.id); }
+    });
+    renderList();
+    if (!initial && !state.selected) fitAll();
+  }
+  function fitAll() {
+    const pts = VT.vehicles.filter(visible).map(v => v.pos);
+    if (view && pts.length) view.fitBounds(pts, 80);
+  }
+
+  function onTick() {
+    VT.vehicles.forEach(v => { const m = markers.get(v.id); if (m) m.update(v, { selected: v.id === state.selected }); });
+    renderList();
+    if (state.selected) {
+      const v = VT.byId(state.selected);
+      updateTripLayers(v);
+      updateDrawer(v);
+      if (state.follow) view.panTo(v.pos);
+    }
+  }
+
+  // ----- selection -----
+  function select(id) {
+    if (state.selected === id) return;
+    state.selected = id;
+    const v = VT.byId(id);
+    history.replaceState(null, "", id ? "?vehicle=" + id : location.pathname);
+    tripLayers.forEach(l => l.remove()); tripLayers = [];
+    document.getElementById("follow").disabled = !id;
+    if (!id) { drawer.classList.remove("is-open"); applyFilter(); fitAll(); return; }
+    applyFilter(true);
+    markers.forEach((m, mid) => m.update(VT.byId(mid), { selected: mid === id }));
+    const travelled = view.addPath(v.travelled, { color: "#0B4F8A", weight: 5 });
+    const remaining = view.addPath(v.remaining, { color: "#5F6F85", weight: 4, dashed: true });
+    tripLayers = [travelled, remaining,
+      view.addPin(v.trip.start, { kind: "start", title: "Trip start: " + v.trip.from }),
+      view.addPin(v.trip.end, { kind: "end", title: "Destination: " + v.trip.to })];
+    tripLayers.travelled = travelled; tripLayers.remaining = remaining;
+    renderDrawer(v);
+    view.fitBounds(v.trip.route, 90);
+    if (matchMedia("(min-width: 861px)").matches) rows.get(id).scrollIntoView({ block: "nearest" });
+  }
+  function updateTripLayers(v) {
+    if (tripLayers.travelled) { tripLayers.travelled.setPath(v.travelled); tripLayers.remaining.setPath(v.remaining); }
+  }
+
+  // ----- drawer -----
+  function renderDrawer(v) {
+    const d = v.driver;
+    drawer.innerHTML = `
+      <div class="drawer-head">
+        <div class="row">${UI.plate(v.plate, true)}
+          <button class="btn btn--ghost icon-btn" type="button" id="close" aria-label="Close vehicle details">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6.4 5 5.6 5.6L17.6 5 19 6.4 13.4 12l5.6 5.6-1.4 1.4-5.6-5.6L6.4 19 5 17.6l5.6-5.6L5 6.4z"/></svg>
+          </button>
+        </div>
+        <h2>${v.name}</h2>
+        <div class="sub">${v.make}, ${v.group}</div>
+        <div data-live="status"></div>
+      </div>
+      <div class="gauges">
+        <div class="gauge"><div class="v" data-live="speed"></div><div class="k">Speed</div></div>
+        <div class="gauge"><div class="v" data-live="ign"></div><div class="k">Ignition</div></div>
+        <div class="gauge"><div class="v">${Math.round(v.fuel)}<small>%</small></div><div class="k">Fuel</div></div>
+        <div class="gauge"><div class="v" data-live="upd" style="font-size:17px"></div><div class="k">Last report</div></div>
+      </div>
+
+      <section class="section">
+        <h3>Driver <span class="aside">On shift since ${UI.time(new Date(v.trip.startedAt.getTime() - 40 * 60000))}</span></h3>
+        ${UI.driverCard(d, `<dt>Driving today</dt><dd>${UI.duration(v.trip.startedMinAgo + 95)}</dd>`)}
+        <div class="actions">
+          <a class="btn btn--sm" href="tel:${d.phone.replace(/\s/g, "")}">Call driver</a>
+          <button class="btn btn--sm" type="button" data-mock="Message sent to ${d.name}">Send message</button>
+        </div>
+      </section>
+
+      <section class="section">
+        <h3>Current trip <span class="aside">${v.trip.id}</span></h3>
+        <ol class="journey">
+          <li class="done">
+            <span class="pin pin--start" aria-hidden="true">A</span>
+            <div class="when">${UI.time(v.trip.startedAt)}</div>
+            <div class="where">${v.trip.from}</div>
+            <div class="note">Start point, ${v.trip.start.lat.toFixed(5)}, ${v.trip.start.lng.toFixed(5)}</div>
+          </li>
+          <li class="done">
+            <span class="pin pin--now" aria-hidden="true"></span>
+            <div class="when">Now</div>
+            <div class="where" data-live="pos"></div>
+            <div class="note" data-live="driven"></div>
+          </li>
+          <li>
+            <span class="pin pin--end" aria-hidden="true">B</span>
+            <div class="when" data-live="eta"></div>
+            <div class="where">${v.trip.to}</div>
+            <div class="note">Destination, ${v.trip.end.lat.toFixed(5)}, ${v.trip.end.lng.toFixed(5)}</div>
+          </li>
+        </ol>
+        <div class="progress" aria-hidden="true"><span data-live="bar"></span></div>
+        <div class="progress-label"><span data-live="pct"></span><span>${UI.km(v.trip.totalM)} km planned</span></div>
+        <div class="actions">
+          <a class="btn btn--sm" href="trips.html?vehicle=${v.id}">Earlier trips</a>
+        </div>
+      </section>
+
+      <section class="section">
+        <h3>Tracker</h3>
+        <dl class="facts" style="margin-top:0">
+          <dt>IMEI</dt><dd class="mono">${v.device.imei}</dd>
+          <dt>Protocol</dt><dd>${v.device.protocol}</dd>
+          <dt>Model</dt><dd>${v.device.model}</dd>
+          <dt>Odometer</dt><dd>${v.odometerKm.toLocaleString("en-GB")} km</dd>
+          <dt>Power</dt><dd>${v.power ? v.power.toFixed(1) + " V" : "No data"}</dd>
+        </dl>
+      </section>`;
+    drawer.classList.add("is-open");
+    drawer.querySelector("#close").onclick = () => select(null);
+    drawer.querySelectorAll("[data-mock]").forEach(b => b.onclick = () => UI.toast(b.dataset.mock));
+    updateDrawer(v);
+  }
+  function updateDrawer(v) {
+    const set = (k, html) => { const el = drawer.querySelector(`[data-live="${k}"]`); if (el) el.innerHTML = html; };
+    const pct = Math.round(v.distM / v.trip.totalM * 100);
+    set("status", UI.status(v.status));
+    set("speed", v.status === "offline" ? "–" : `${v.speed}<small>km/h</small>`);
+    set("ign", v.ignition ? "On" : "Off");
+    set("upd", UI.ago(v.lastUpdate));
+    set("pos", `${v.pos.lat.toFixed(5)}, ${v.pos.lng.toFixed(5)}`);
+    set("driven", `${UI.km(v.distM)} km driven, ${UI.duration((Date.now() - v.trip.startedAt) / 60000)} since start`);
+    set("eta", v.status === "offline" ? "Arrival unknown" : `About ${UI.time(new Date(Date.now() + v.trip.etaMin * 60000))}`);
+    set("pct", `${pct}% of route`);
+    const bar = drawer.querySelector('[data-live="bar"]'); if (bar) bar.style.width = pct + "%";
+  }
+
+  // ----- tools -----
+  document.getElementById("fit-all").onclick = () => { state.follow = false; document.getElementById("follow").setAttribute("aria-pressed", false); fitAll(); };
+  const toggle = (id, fn) => { const b = document.getElementById(id); b.onclick = () => { const on = b.getAttribute("aria-pressed") !== "true"; b.setAttribute("aria-pressed", on); fn(on); }; };
+  toggle("follow", on => { state.follow = on; if (on && state.selected) view.panTo(VT.byId(state.selected).pos); });
+  toggle("plates", on => mapEl.classList.toggle("show-plates", on));
+  toggle("traffic", on => view.setTraffic(on));
+  document.addEventListener("keydown", e => { if (e.key === "Escape" && state.selected) select(null); });
+
+  renderList();
+})();
+</script>
+</body>
+</html>

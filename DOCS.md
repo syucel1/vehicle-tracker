@@ -6,6 +6,7 @@
 | [vehicle-tracker-design.pdf](vehicle-tracker-design.pdf) | System design (print / share version) | v0.1 draft |
 | [README.md → Phase 1](README.md#phase-1-device-ingestion) | Phase 1 build/run guide, Kafka topics, message contracts, known limitations | Current |
 | [traccar.xml](deploy/gateway/traccar.xml) | Ingestion gateway configuration | Phase 1 |
+| [mockup/](mockup/README.md) | Clickable HTML mockups of the management console (Google Maps) | Mockup |
 | roadmap/ | Delivery roadmap | Planned |
 | adr/ | Architecture Decision Records | Planned |
 

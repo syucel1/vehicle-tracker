@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vehicles and drivers - Vehicle Tracker</title>
+<link rel="stylesheet" href="assets/styles.css">
+</head>
+<body>
+<main class="page">
+  <div class="page-head">
+    <div>
+      <h1>Vehicles and drivers</h1>
+      <p>Register vehicles, assign drivers and connect tracking devices.</p>
+    </div>
+    <button class="btn btn--primary" type="button" id="add-vehicle">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6z"/></svg>
+      Add vehicle
+    </button>
+  </div>
+
+  <div class="tabs" role="tablist" aria-label="Fleet records">
+    <button role="tab" aria-selected="true" aria-controls="tab-vehicles" id="t-vehicles">Vehicles<span class="count" id="c-vehicles"></span></button>
+    <button role="tab" aria-selected="false" aria-controls="tab-drivers" id="t-drivers">Drivers<span class="count" id="c-drivers"></span></button>
+    <button role="tab" aria-selected="false" aria-controls="tab-devices" id="t-devices">Tracking devices<span class="count" id="c-devices"></span></button>
+  </div>
+
+  <div class="toolbar">
+    <label class="search">
+      <span class="visually-hidden">Search</span>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 3a7 7 0 0 1 5.6 11.2l5 5-1.4 1.4-5-5A7 7 0 1 1 10 3zm0 2a5 5 0 1 0 0 10 5 5 0 0 0 0-10z"/></svg>
+      <input class="input" id="q" type="search" placeholder="Search by plate, name, IMEI or group">
+    </label>
+  </div>
+
+  <section id="tab-vehicles" role="tabpanel" aria-labelledby="t-vehicles" class="table-wrap">
+    <table>
+      <thead><tr><th>Vehicle</th><th>Group</th><th>Driver</th><th>Tracker</th><th>Status</th><th>Last report</th><th></th></tr></thead>
+      <tbody id="vehicles-body"></tbody>
+    </table>
+  </section>
+  <section id="tab-drivers" role="tabpanel" aria-labelledby="t-drivers" class="table-wrap" hidden>
+    <table>
+      <thead><tr><th>Driver</th><th>Contact</th><th>Licence</th><th>Valid to</th><th>Assigned vehicle</th><th>Rating</th></tr></thead>
+      <tbody id="drivers-body"></tbody>
+    </table>
+  </section>
+  <section id="tab-devices" role="tabpanel" aria-labelledby="t-devices" class="table-wrap" hidden>
+    <table>
+      <thead><tr><th>IMEI</th><th>Model</th><th>Protocol</th><th>Gateway port</th><th>Installed in</th><th>Last message</th></tr></thead>
+      <tbody id="devices-body"></tbody>
+    </table>
+  </section>
+</main>
+
+<dialog id="dlg" aria-labelledby="dlg-title">
+  <form method="dialog" id="vehicle-form">
+    <div class="dialog-head">
+      <h2 id="dlg-title">Add vehicle</h2>
+      <p>The vehicle appears on the live map as soon as its tracker sends a first position.</p>
+    </div>
+    <div class="dialog-body">
+      <div class="field"><label for="f-plate">Number plate</label><input class="input" id="f-plate" required placeholder="AB12 CDE" style="text-transform:uppercase"></div>
+      <div class="field"><label for="f-name">Name</label><input class="input" id="f-name" required placeholder="Van 30"></div>
+      <div class="field"><label for="f-type">Type</label><select class="select" id="f-type"><option>Van</option><option>Truck</option><option>Car</option><option>Motorbike</option></select></div>
+      <div class="field"><label for="f-group">Group</label><select class="select" id="f-group"></select></div>
+      <div class="field"><label for="f-driver">Driver</label><select class="select" id="f-driver"><option value="">Not assigned</option></select></div>
+      <div class="field"><label for="f-protocol">Tracker protocol</label><select class="select" id="f-protocol"></select></div>
+      <div class="field full"><label for="f-imei">Tracker IMEI</label><input class="input mono" id="f-imei" required inputmode="numeric" pattern="\d{15}" placeholder="15 digits, printed on the device"><span class="hint">Usually printed on the device label or the SIM tray.</span></div>
+      <div class="callout full" id="setup-hint"></div>
+    </div>
+    <div class="dialog-foot">
+      <button class="btn" value="cancel" formnovalidate>Cancel</button>
+      <button class="btn btn--primary" value="save" id="save">Add vehicle</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="assets/config.js"></script>
+<script src="assets/app.js"></script>
+<script src="assets/data.js"></script>
+<script>
+(function () {
+  "use strict";
+  UI.topbar("fleet.html");
+
+  // Default ports of a few common protocols on the ingestion gateway (see deploy/gateway/traccar.xml)
+  const PROTOCOLS = [["Teltonika", 5027], ["GT06", 5023], ["H02", 5013], ["OsmAnd", 5055], ["Queclink", 5004], ["Meitrack", 5020], ["TK103", 5002], ["Coban", 5001]];
+  const portOf = p => (PROTOCOLS.find(x => x[0] === p) || [p, "–"])[1];
+  const vehicles = VT.vehicles.slice();
+  let q = "";
+
+  const match = (...fields) => !q || fields.join(" ").toLowerCase().includes(q);
+
+  function render() {
+    document.getElementById("vehicles-body").innerHTML = vehicles
+      .filter(v => match(v.plate, v.name, v.group, v.driver ? v.driver.name : "", v.device.imei))
+      .map(v => `<tr>
+        <td>${UI.plate(v.plate)} <b style="margin-left:6px">${v.name}</b><span class="sub">${v.make || v.type}</span></td>
+        <td>${v.group}</td>
+        <td>${v.driver ? v.driver.name : '<span class="sub">Not assigned</span>'}</td>
+        <td class="mono">${v.device.imei}<span class="sub">${v.device.protocol}</span></td>
+        <td>${UI.status(v.status)}</td>
+        <td>${v.lastUpdate ? UI.ago(v.lastUpdate) : '<span class="sub">Waiting for first position</span>'}</td>
+        <td>${v.pos ? `<a class="btn btn--sm" href="live-map.html?vehicle=${v.id}">Show on map</a>` : ""}</td>
+      </tr>`).join("") || '<tr><td colspan="7">No vehicles match your search.</td></tr>';
+
+    document.getElementById("drivers-body").innerHTML = VT.drivers
+      .filter(d => match(d.name, d.employeeId, d.email, d.licence))
+      .map(d => {
+        const v = vehicles.find(x => x.driver && x.driver.id === d.id);
+        const expiresSoon = new Date(d.licenceExpiry) - Date.now() < 90 * 864e5;
+        return `<tr>
+          <td><b>${d.name}</b><span class="sub">${d.employeeId}</span></td>
+          <td>${d.phone}<span class="sub">${d.email}</span></td>
+          <td class="mono">${d.licence}<span class="sub">${d.licenceClass}</span></td>
+          <td>${UI.date(d.licenceExpiry)}${expiresSoon ? '<span class="sub" style="color:var(--stopped);font-weight:600">Renewal due</span>' : ""}</td>
+          <td>${v ? UI.plate(v.plate) + " " + v.name : '<span class="sub">None</span>'}</td>
+          <td class="num">${d.rating.toFixed(1)}</td>
+        </tr>`;
+      }).join("") || '<tr><td colspan="6">No drivers match your search.</td></tr>';
+
+    document.getElementById("devices-body").innerHTML = vehicles
+      .filter(v => match(v.device.imei, v.device.model, v.device.protocol, v.plate))
+      .map(v => `<tr>
+        <td class="mono">${v.device.imei}</td>
+        <td>${v.device.model}</td>
+        <td>${v.device.protocol}</td>
+        <td class="num">${portOf(v.device.protocol)}</td>
+        <td>${UI.plate(v.plate)} ${v.name}</td>
+        <td>${v.lastUpdate ? UI.ago(v.lastUpdate) : '<span class="sub">Never</span>'}</td>
+      </tr>`).join("") || '<tr><td colspan="6">No devices match your search.</td></tr>';
+
+    document.getElementById("c-vehicles").textContent = vehicles.length;
+    document.getElementById("c-drivers").textContent = VT.drivers.length;
+    document.getElementById("c-devices").textContent = vehicles.length;
+  }
+
+  // tabs
+  const tabs = [...document.querySelectorAll('[role="tab"]')];
+  tabs.forEach(t => t.onclick = () => {
+    tabs.forEach(x => { x.setAttribute("aria-selected", x === t); document.getElementById(x.getAttribute("aria-controls")).hidden = x !== t; });
+  });
+  document.getElementById("q").oninput = e => { q = e.target.value.trim().toLowerCase(); render(); };
+
+  // add vehicle dialog
+  const dlg = document.getElementById("dlg");
+  const groupSel = document.getElementById("f-group");
+  [...new Set(VT.vehicles.map(v => v.group))].sort().forEach(g => groupSel.add(new Option(g, g)));
+  VT.drivers.forEach(d => document.getElementById("f-driver").add(new Option(d.name, d.id)));
+  const protoSel = document.getElementById("f-protocol");
+  PROTOCOLS.forEach(([p]) => protoSel.add(new Option(p, p)));
+  const hint = () => document.getElementById("setup-hint").innerHTML =
+    `Set the tracker's server to <b>track.example.com</b>, port <b>${portOf(protoSel.value)}</b>. 270 protocols are supported; the full list is on the gateway's protocol page.`;
+  protoSel.onchange = hint; hint();
+  document.getElementById("add-vehicle").onclick = () => { document.getElementById("vehicle-form").reset(); hint(); dlg.showModal(); };
+  dlg.addEventListener("close", () => {
+    if (dlg.returnValue !== "save") return;
+    const plate = document.getElementById("f-plate").value.toUpperCase().trim();
+    const driver = VT.drivers.find(d => d.id === document.getElementById("f-driver").value) || null;
+    vehicles.unshift({
+      id: "new" + Date.now(), plate, name: document.getElementById("f-name").value.trim(),
+      type: document.getElementById("f-type").value, group: groupSel.value, driver, status: "offline", lastUpdate: null,
+      device: { imei: document.getElementById("f-imei").value, protocol: protoSel.value, model: "Not reported yet" }
+    });
+    render();
+    UI.toast(`Added ${plate}. It appears on the live map after the first position.`);
+  });
+
+  render();
+  VT.subscribe(() => {});          // keep the simulated fleet moving so statuses stay current
+  setInterval(render, 5000);
+})();
+</script>
+</body>
+</html>

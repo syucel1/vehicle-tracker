@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trips - Vehicle Tracker</title>
+<link rel="stylesheet" href="assets/styles.css">
+</head>
+<body>
+<main class="console">
+  <aside class="sidebar" aria-label="Trips">
+    <div class="sidebar-head">
+      <h1>Trips</h1>
+      <div class="sub" id="trip-summary"></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+        <label class="visually-hidden" for="day">Day</label>
+        <select class="select" id="day"><option>Today</option><option>Yesterday</option><option>Last 7 days</option></select>
+        <label class="visually-hidden" for="vehicle">Vehicle</label>
+        <select class="select" id="vehicle"><option value="">All vehicles</option></select>
+      </div>
+    </div>
+    <ul class="list" id="trip-list" role="listbox" aria-label="Trips"></ul>
+  </aside>
+
+  <section class="map-area" aria-label="Trip map">
+    <div class="map" id="map"></div>
+    <div class="playback" id="playback">
+      <button class="btn btn--primary btn--sm icon-btn" type="button" id="play" aria-label="Play trip">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4v16l13-8z"/></svg>
+      </button>
+      <span class="clock" id="clock" aria-live="off">--:--</span>
+      <label class="visually-hidden" for="scrub">Trip position</label>
+      <input type="range" id="scrub" min="0" max="1000" value="0">
+      <label class="visually-hidden" for="rate">Playback speed</label>
+      <select class="select rate" id="rate"><option value="30">30×</option><option value="60" selected>60×</option><option value="120">120×</option></select>
+    </div>
+  </section>
+
+  <aside class="drawer is-open" id="drawer" aria-label="Trip details"></aside>
+</main>
+
+<script src="assets/config.js"></script>
+<script src="assets/app.js"></script>
+<script src="assets/data.js"></script>
+<script src="assets/map.js"></script>
+<script>
+(function () {
+  "use strict";
+  UI.topbar("trips.html");
+
+  const listEl = document.getElementById("trip-list");
+  const drawer = document.getElementById("drawer");
+  const vehicleSel = document.getElementById("vehicle");
+  const params = new URLSearchParams(location.search);
+  let filterVehicle = params.get("vehicle") || "";
+  let selected = null, view = null, layers = [], ghost = null, playing = null;
+
+  VT.vehicles.forEach(v => vehicleSel.add(new Option(`${v.plate}, ${v.name}`, v.id)));
+  vehicleSel.value = filterVehicle;
+  vehicleSel.onchange = () => { filterVehicle = vehicleSel.value; renderList(); const first = trips()[0]; if (first) select(first.id); };
+  document.getElementById("day").onchange = () => UI.toast("This mockup only has today's trips");
+
+  const trips = () => VT.trips.filter(t => !filterVehicle || t.vehicle.id === filterVehicle);
+
+  function renderList() {
+    const list = trips();
+    const totalKm = list.reduce((a, t) => a + t.distanceKm, 0);
+    document.getElementById("trip-summary").textContent = `${list.length} completed trips, ${totalKm.toFixed(0)} km`;
+    listEl.innerHTML = list.length ? "" : '<li class="list-empty">No trips for this vehicle today. Choose another vehicle or day.</li>';
+    list.forEach(t => {
+      const li = document.createElement("li");
+      li.className = "vrow trip-row"; li.setAttribute("role", "option"); li.tabIndex = 0;
+      li.setAttribute("aria-selected", t.id === selected);
+      li.innerHTML = `
+        <span>${UI.plate(t.vehicle.plate)}</span>
+        <span class="when">${UI.time(t.start)}–${UI.time(t.end)}</span>
+        <span class="who">${t.driver.name}, ${t.vehicle.name}</span>
+        <span class="route"><b>${t.from}</b> to <b>${t.to}</b></span>
+        <span class="meta" style="grid-column:1/-1"><span>${t.distanceKm.toFixed(1)} km, ${UI.duration(t.durationMin)}</span><span class="tag">${t.id}</span></span>`;
+      li.onclick = () => select(t.id);
+      li.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); select(t.id); } };
+      listEl.append(li);
+    });
+  }
+
+  function select(id) {
+    selected = id;
+    const t = VT.trips.find(x => x.id === id);
+    renderList();
+    stop();
+    layers.forEach(l => l.remove()); layers = [];
+    if (ghost) { ghost.remove(); ghost = null; }
+    if (!t || !view) return;
+    layers.push(view.addPath(t.route, { color: "#0B4F8A", weight: 5 }));
+    t.stops.forEach((s, i) => layers.push(view.addPin(s.pos, { kind: "stop", label: String(i + 1), title: `Stop ${i + 1}, ${s.minutes} min` })));
+    layers.push(view.addPin(t.startPos, { kind: "start", title: "Start: " + t.from }));
+    layers.push(view.addPin(t.endPos, { kind: "end", title: "End: " + t.to }));
+    const playerVehicle = Object.assign({}, t.vehicle, { pos: t.startPos, status: "moving", course: 0 });
+    ghost = view.addVehicle(playerVehicle, { selected: true });
+    view.fitBounds(t.route, 90);
+    renderDrawer(t);
+    seek(0);
+  }
+
+  // ----- playback -----
+  const scrub = document.getElementById("scrub");
+  const clock = document.getElementById("clock");
+  const playBtn = document.getElementById("play");
+  function current() { return VT.trips.find(x => x.id === selected); }
+  function seek(f) {
+    const t = current(); if (!t) return;
+    const at = VT.geo.along(t.route, t.cum, t.totalM * f);
+    ghost.update(Object.assign({}, t.vehicle, { pos: at.pos, course: at.course, status: f >= 1 ? "stopped" : "moving" }), { selected: true });
+    clock.textContent = UI.time(new Date(t.start.getTime() + (t.end - t.start) * f));
+    scrub.value = Math.round(f * 1000);
+  }
+  scrub.oninput = () => { stop(); seek(scrub.value / 1000); };
+  function stop() {
+    if (playing) cancelAnimationFrame(playing);
+    playing = null;
+    playBtn.setAttribute("aria-label", "Play trip");
+    playBtn.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4v16l13-8z"/></svg>';
+  }
+  playBtn.onclick = () => {
+    const t = current(); if (!t) return;
+    if (playing) { stop(); return; }
+    playBtn.setAttribute("aria-label", "Pause trip");
+    playBtn.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 4h4v16H6zm8 0h4v16h-4z"/></svg>';
+    let f = scrub.value >= 1000 ? 0 : scrub.value / 1000, last = performance.now();
+    const step = now => {
+      const rate = +document.getElementById("rate").value;
+      f += (now - last) / 1000 * rate / ((t.end - t.start) / 1000);
+      last = now;
+      if (f >= 1) { seek(1); stop(); return; }
+      seek(f);
+      playing = requestAnimationFrame(step);
+    };
+    playing = requestAnimationFrame(step);
+  };
+
+  // ----- drawer -----
+  function renderDrawer(t) {
+    const v = t.vehicle;
+    drawer.innerHTML = `
+      <div class="drawer-head">
+        <div class="row">${UI.plate(v.plate, true)}<a class="btn btn--sm" href="live-map.html?vehicle=${v.id}">Show live</a></div>
+        <h2>${t.id}</h2>
+        <div class="sub">${v.name}, ${v.make}</div>
+      </div>
+      <div class="stats">
+        <div class="gauge"><div class="v">${t.distanceKm.toFixed(1)}<small>km</small></div><div class="k">Distance</div></div>
+        <div class="gauge"><div class="v" style="font-size:19px">${UI.duration(t.durationMin)}</div><div class="k">Duration</div></div>
+        <div class="gauge"><div class="v">${t.stops.length}</div><div class="k">Stops</div></div>
+        <div class="gauge"><div class="v">${t.avgKph}<small>km/h</small></div><div class="k">Average speed</div></div>
+        <div class="gauge"><div class="v">${t.maxSpeed}<small>km/h</small></div><div class="k">Top speed</div></div>
+        <div class="gauge"><div class="v">${t.idleMin}<small>min</small></div><div class="k">Engine idling</div></div>
+      </div>
+      <section class="section">
+        <h3>Start and end</h3>
+        <ol class="journey">
+          <li class="done">
+            <span class="pin pin--start" aria-hidden="true">A</span>
+            <div class="when">${UI.time(t.start)}</div>
+            <div class="where">${t.from}</div>
+            <div class="note">${t.startPos.lat.toFixed(5)}, ${t.startPos.lng.toFixed(5)}</div>
+          </li>
+          ${t.stops.map((s, i) => `
+          <li class="done">
+            <span class="pin" style="background:#fff;border:2px solid var(--ink-2);color:var(--ink)" aria-hidden="true">${i + 1}</span>
+            <div class="where">Stop ${i + 1}, ${s.minutes} min</div>
+            <div class="note">${s.pos.lat.toFixed(5)}, ${s.pos.lng.toFixed(5)}</div>
+          </li>`).join("")}
+          <li>
+            <span class="pin pin--end" aria-hidden="true">B</span>
+            <div class="when">${UI.time(t.end)}</div>
+            <div class="where">${t.to}</div>
+            <div class="note">${t.endPos.lat.toFixed(5)}, ${t.endPos.lng.toFixed(5)}</div>
+          </li>
+        </ol>
+      </section>
+      <section class="section">
+        <h3>Driver</h3>
+        ${UI.driverCard(t.driver)}
+      </section>
+      <section class="section">
+        <h3>Events</h3>
+        <ul class="timeline">
+          ${t.events.map(e => `<li><time>${UI.time(e.at)}</time><span class="${e.warn ? "warn" : ""}">${e.text}</span></li>`).join("")}
+        </ul>
+        <div class="actions"><button class="btn btn--sm" type="button" id="export">Download trip report</button></div>
+      </section>`;
+    drawer.querySelector("#export").onclick = () => UI.toast("Trip report export is not part of the mockup");
+  }
+
+  VTMap.create(document.getElementById("map"), { center: { lat: 51.505, lng: -0.15 }, zoom: 11 }).then(v => {
+    view = v;
+    renderList();
+    const first = trips()[0];
+    if (first) select(params.get("trip") && VT.trips.some(t => t.id === params.get("trip")) ? params.get("trip") : first.id);
+  });
+  renderList();
+})();
+</script>
+</body>
+</html>
