@@ -1,0 +1,120 @@
+# Vehicle Tracker - Phase 1: device ingestion + Kafka backbone
+#
+#   docker compose up -d --build                         # Kafka, gateway, ingest-bridge
+#   docker compose --profile simulator up -d --build     # ... plus 8 simulated trackers
+#
+# Ports on the host:
+#   5001-5268 tcp/udp  GPS device protocols (one port per protocol, e.g. GT06 5023, Teltonika 5027)
+#   29092              Kafka for tools running on the host (inside Docker use kafka:9092)
+#   8081               ingest-bridge health & metrics (/actuator/health, /actuator/prometheus)
+#   127.0.0.1:8082     gateway admin UI, for troubleshooting only
+
+name: vehicle-tracker
+
+services:
+
+  kafka:
+    image: apache/kafka:${KAFKA_VERSION:-4.1.0}
+    hostname: kafka
+    ports:
+      - "29092:29092"
+    environment:
+      CLUSTER_ID: 4L6g3nShT-eMCtK--X86sw   # any base64 UUID; fixed so restarts reuse the cluster
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: INTERNAL://:9092,EXTERNAL://:29092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      start_period: 20s
+      retries: 12
+    restart: unless-stopped
+
+  # One-shot: create topics (12 partitions, keyed by device). Safe to re-run.
+  kafka-init:
+    image: apache/kafka:${KAFKA_VERSION:-4.1.0}
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        create() {
+          /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists \
+            --topic "$$1" --partitions 12 --replication-factor 1 --config retention.ms="$$2"
+        }
+        create traccar.positions  86400000      # 1 day: replayable buffer between gateway and bridge
+        create traccar.events     86400000
+        create positions.raw      604800000     # 7 days
+        create device.events      604800000
+        create positions.rejected 604800000
+        create device.unknown     604800000
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list
+    restart: "no"
+
+  # Ingestion gateway: Traccar decodes 200+ device protocols and forwards to Kafka.
+  gateway:
+    image: traccar/traccar:${TRACCAR_VERSION:-6.17-alpine}
+    hostname: gateway
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    ports:
+      - "5001-5268:5001-5268"
+      - "5001-5268:5001-5268/udp"
+      - "127.0.0.1:8082:8082"
+    volumes:
+      - ./deploy/gateway/traccar.xml:/opt/traccar/conf/traccar.xml:ro
+      - gateway-data:/opt/traccar/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8082/api/health"]
+      interval: 15s
+      timeout: 5s
+      start_period: 60s
+      retries: 5
+    restart: unless-stopped
+
+  # Normalises gateway output into canonical topics (positions.raw, device.events, ...).
+  ingest-bridge:
+    build:
+      context: .
+      dockerfile: services/ingest-bridge/Dockerfile
+    image: vehicle-tracker/ingest-bridge:dev
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      TRACKER_DEVICES_MODE: ${TRACKER_DEVICES_MODE:-OPEN}
+      TRACKER_DEVICES_ALLOWED: ${TRACKER_DEVICES_ALLOWED:-}
+    ports:
+      - "8081:8081"
+    restart: unless-stopped
+
+  # Optional: simulated trackers speaking GT06, Teltonika, H02 and OsmAnd.
+  simulator:
+    profiles: ["simulator"]
+    build:
+      context: .
+      dockerfile: tools/device-simulator/Dockerfile
+    image: vehicle-tracker/device-simulator:dev
+    depends_on:
+      gateway:
+        condition: service_healthy
+    command: ["--host", "gateway", "--devices", "${SIM_DEVICES:-8}", "--interval", "${SIM_INTERVAL:-5}"]
+    restart: unless-stopped
+
+volumes:
+  gateway-data:

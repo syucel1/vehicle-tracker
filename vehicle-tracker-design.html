@@ -355,7 +355,7 @@
 
 <h3>5.5 Core API</h3>
 <ul>
-  <li>Spring Boot 3 REST service (Spring MVC, Spring Security as OAuth2 Resource Server).</li>
+  <li>Spring Boot 4 REST service (Spring MVC, Spring Security as OAuth2 Resource Server).</li>
   <li>Owns tenants, users (profile; credentials live in the IdP), roles, groups, vehicles, devices (Device Registry), geofences, history queries, command requests, audit log.</li>
   <li>Publishes registry changes to <code>device.registry</code> for gateway caches; publishes command requests to <code>device.commands</code>.</li>
 </ul>
@@ -552,7 +552,7 @@ audit_log       (id, tenant_id, user_id, action, entity, entity_id, data jsonb, 
 <table>
 <tr><th>Layer</th><th>Choice</th><th>Notes</th></tr>
 <tr><td>Language / runtime</td><td>Java 21 LTS</td><td>Virtual threads for blocking I/O in REST services.</td></tr>
-<tr><td>Framework</td><td>Spring Boot 3.x</td><td>Spring Security, Spring Kafka, Spring WebSocket/WebFlux, springdoc.</td></tr>
+<tr><td>Framework</td><td>Spring Boot 4.x</td><td>Spring Security, Spring Kafka, Spring WebSocket/WebFlux, springdoc.</td></tr>
 <tr><td>Protocol decoding</td><td>Traccar server (Apache 2.0), Netty</td><td>Pinned version; upgraded deliberately with regression tests.</td></tr>
 <tr><td>Messaging</td><td>Apache Kafka</td><td>Schemas in Avro/Protobuf with a schema registry.</td></tr>
 <tr><td>Databases</td><td>PostgreSQL + TimescaleDB + PostGIS</td><td>One engine for relational, time-series and geo initially.</td></tr>
