@@ -2,7 +2,7 @@
 
 Real-time vehicle tracking: GPS tracker devices connect to a Java backend, which decodes their reports (200+ GPS protocols), stores them, and streams live positions over WebSocket to an authenticated web management application that shows the fleet on a map.
 
-> **Status:** Phase 1 in progress — device ingestion and the Kafka backbone (6 Nov 2026).
+> **Status:** Phase 1 (device ingestion) written; Phase 2 started with the Live Hub WebSocket service (27 Nov 2026). See [ROADMAP.md](ROADMAP.md).
 
 ## Documentation
 
@@ -10,7 +10,7 @@ Real-time vehicle tracking: GPS tracker devices connect to a Java backend, which
 |---|---|---|
 | System design | [HTML](vehicle-tracker-design.html) · [PDF](vehicle-tracker-design.pdf) | Architecture, components, data flow, WebSocket/REST contracts, data model, security, scaling, risks |
 | Console mockups | [mockup/](mockup/README.md) | Clickable HTML mockups of the web app (live map with multiple vehicles, selected vehicle with driver and trip start/end, trip history, fleet admin) on Google Maps |
-| Roadmap | _coming next_ | Phases, milestones, team, estimates |
+| Roadmap | [ROADMAP.md](ROADMAP.md) | Phases, items, status and acceptance criteria |
 
 See [DOCS.md](DOCS.md) for the documentation index.
 
@@ -39,6 +39,7 @@ Phase 1 covers only: **tracker device ⇄ backend communication, protocol decodi
 | **Kafka** | [`docker-compose.yml`](docker-compose.yml) | Single-node KRaft broker; topics created by `kafka-init`, 12 partitions each, keyed by device. |
 | **ingest-bridge** | [`services/ingest-bridge`](services/ingest-bridge) | Consumes gateway topics in batches, converts to the canonical schema, validates, applies the device allow-list, re-keys by IMEI, publishes. At-least-once: offsets are committed only after Kafka acknowledges the output. |
 | **tracker-model** | [`libs/tracker-model`](libs/tracker-model) | Shared canonical message contracts (`Position`, `DeviceEvent`, `UnknownDevice`, `RejectedMessage`) and topic names. |
+| **live-hub** | [`services/live-hub`](services/live-hub) | WebSocket service for browsers (`/ws/live`): rebuilds last positions from `positions.latest` on start, sends a snapshot on subscribe, then batched live positions (newest per vehicle, every 250 ms) and device events. Viewport and device filters, dev-token or JWT auth. Debug page at `/`. |
 | **device-simulator** | [`tools/device-simulator`](tools/device-simulator) | Simulated trackers speaking the real wire protocols (GT06, Teltonika Codec 8, H02, OsmAnd), driving around London. JDK only, no dependencies. |
 
 ### Quick start (Docker)
@@ -55,6 +56,8 @@ docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh \
 
 docker compose logs -f ingest-bridge simulator
 curl http://localhost:8081/actuator/health
+# live view: open http://localhost:8090 in a browser (token: dev-token)
+curl http://localhost:8090/api/status
 curl -s http://localhost:8081/actuator/prometheus | grep tracker_bridge
 ```
 
@@ -85,6 +88,7 @@ java -jar tools/device-simulator/target/device-simulator.jar --help
 | `traccar.positions` | gateway device id | Traccar `PositionData` JSON | gateway |
 | `traccar.events` | gateway device id | Traccar `EventData` JSON | gateway |
 | `positions.raw` | IMEI | [`Position`](libs/tracker-model/src/main/java/com/vehicletracker/model/Position.java) v1 | ingest-bridge |
+| `positions.latest` | IMEI | same `Position` as above; **compacted**, one record per device (last known position) | ingest-bridge |
 | `device.events` | IMEI | [`DeviceEvent`](libs/tracker-model/src/main/java/com/vehicletracker/model/DeviceEvent.java) v1, e.g. `DEVICE_ONLINE`, `IGNITION_ON`, `ALARM` | ingest-bridge |
 | `device.unknown` | IMEI | [`UnknownDevice`](libs/tracker-model/src/main/java/com/vehicletracker/model/UnknownDevice.java), at most once per device per 10 min | ingest-bridge |
 | `positions.rejected` | IMEI or source key | [`RejectedMessage`](libs/tracker-model/src/main/java/com/vehicletracker/model/RejectedMessage.java) with reason and original payload | ingest-bridge |
@@ -98,6 +102,22 @@ Example `positions.raw` value:
  "satellites":9,"ignition":true,"motion":true,"odometerM":4200000.0,
  "attributes":{"rssi":4,"distance":12.37,"totalDistance":81234.5},"gatewayDeviceId":7}
 ```
+
+### Live Hub WebSocket protocol (`ws://host:8090/ws/live`)
+
+```text
+client: {"type":"auth","token":"dev-token"}                 first message, within 10 s
+server: {"type":"ready","subject":"dev","serverTime":"..."}
+client: {"type":"subscribe","devices":null,"bounds":{"n":51.7,"s":51.3,"e":0.3,"w":-0.5}}   both optional
+server: {"type":"snapshot","positions":[Position...]}
+server: {"type":"positions","positions":[Position...]}      every 250 ms, newest per device only
+server: {"type":"events","events":[DeviceEvent...]}
+client: {"type":"bounds","bounds":{...}}                    map moved: new snapshot for the new viewport
+client: {"type":"ping"}  ->  server: {"type":"pong"}
+server: {"type":"error","code":"unauthorized|not_authenticated|bad_request","message":"..."}
+```
+
+Auth: `LIVE_HUB_AUTH_MODE=DEV` (default) accepts the shared `LIVE_HUB_DEV_TOKEN`; `JWT` validates tokens against `LIVE_HUB_JWK_SET_URI` and reads allowed device IDs from the `vt_devices` claim (`"*"` = all). Clients that are too slow are disconnected and get a fresh snapshot when they reconnect.
 
 ### Configuration (ingest-bridge)
 
@@ -131,9 +151,11 @@ vehicle-tracker/
 ├── docker-compose.yml            # Kafka, gateway, ingest-bridge, simulator profile
 ├── deploy/gateway/traccar.xml    # gateway configuration
 ├── libs/tracker-model/           # canonical message contracts
-├── services/ingest-bridge/       # Spring Boot service
+├── services/ingest-bridge/       # Spring Boot: gateway output -> canonical topics
+├── services/live-hub/            # Spring Boot: WebSocket live feed for browsers
 ├── tools/device-simulator/       # protocol simulator
-├── README.md · DOCS.md
+├── mockup/                       # clickable console mockups
+├── README.md · DOCS.md · ROADMAP.md
 └── vehicle-tracker-design.html / .pdf
 ```
 

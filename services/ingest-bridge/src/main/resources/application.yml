@@ -53,6 +53,7 @@ tracker:
     gateway-positions: traccar.positions
     gateway-events: traccar.events
     positions-raw: positions.raw
+    positions-latest: positions.latest
     positions-rejected: positions.rejected
     device-events: device.events
     device-unknown: device.unknown

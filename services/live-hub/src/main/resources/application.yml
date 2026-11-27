@@ -1,0 +1,42 @@
+spring:
+  application:
+    name: live-hub
+  threads:
+    virtual:
+      enabled: true
+
+server:
+  port: ${SERVER_PORT:8090}
+
+live-hub:
+  bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:29092}
+  positions-topic: positions.latest
+  events-topic: device.events
+  flush-interval-ms: 250
+  auth-timeout: 10s
+  # Comma-separated when set through the environment, e.g. LIVE_HUB_ALLOWED_ORIGINS=https://console.example.com
+  allowed-origins: ${LIVE_HUB_ALLOWED_ORIGINS:*}
+  auth:
+    # DEV = one shared token sees all devices (development only). JWT = validate identity-provider tokens.
+    mode: ${LIVE_HUB_AUTH_MODE:DEV}
+    dev-token: ${LIVE_HUB_DEV_TOKEN:dev-token}
+    jwk-set-uri: ${LIVE_HUB_JWK_SET_URI:}
+    devices-claim: vt_devices
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
+logging:
+  level:
+    com.vehicletracker: INFO
+    org.apache.kafka: WARN

@@ -30,7 +30,7 @@ import static org.junit.jupiter.api.Assertions.fail;
                 "tracker.devices.mode=OPEN"
         })
 @EmbeddedKafka(partitions = 1, topics = {
-        "traccar.positions", "traccar.events", "positions.raw", "positions.rejected", "device.events",
+        "traccar.positions", "traccar.events", "positions.raw", "positions.latest", "positions.rejected", "device.events",
         "device.unknown"})
 class IngestBridgeIntegrationTest {
 
