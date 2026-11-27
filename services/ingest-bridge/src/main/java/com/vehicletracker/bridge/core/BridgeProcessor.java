@@ -27,7 +27,8 @@ public final class BridgeProcessor {
         }
     }
 
-    public record Topics(String positionsRaw, String positionsRejected, String deviceEvents, String deviceUnknown) {
+    public record Topics(String positionsRaw, String positionsLatest, String positionsRejected, String deviceEvents,
+                         String deviceUnknown) {
     }
 
     private final PayloadCodec codec;
@@ -73,7 +74,10 @@ public final class BridgeProcessor {
                     position.latitude(), position.longitude(), position.gatewayDeviceId());
             return Result.of(Outcome.UNKNOWN_DEVICE, new Outbound(topics.deviceUnknown(), uid, codec.write(notice)));
         }
-        return Result.of(Outcome.ACCEPTED, new Outbound(topics.positionsRaw(), uid, codec.write(position)));
+        String json = codec.write(position);
+        return Result.of(Outcome.ACCEPTED,
+                new Outbound(topics.positionsRaw(), uid, json),
+                new Outbound(topics.positionsLatest(), uid, json));
     }
 
     public Result onGatewayEvent(String sourceTopic, String key, String payload) {

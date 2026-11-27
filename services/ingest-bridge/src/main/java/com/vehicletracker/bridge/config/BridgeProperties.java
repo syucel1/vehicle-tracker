@@ -78,6 +78,7 @@ public class BridgeProperties {
         private String gatewayPositions = Topics.TRACCAR_POSITIONS;
         private String gatewayEvents = Topics.TRACCAR_EVENTS;
         private String positionsRaw = Topics.POSITIONS_RAW;
+        private String positionsLatest = Topics.POSITIONS_LATEST;
         private String positionsRejected = Topics.POSITIONS_REJECTED;
         private String deviceEvents = Topics.DEVICE_EVENTS;
         private String deviceUnknown = Topics.DEVICE_UNKNOWN;
@@ -104,6 +105,14 @@ public class BridgeProperties {
 
         public void setPositionsRaw(String positionsRaw) {
             this.positionsRaw = positionsRaw;
+        }
+
+        public String getPositionsLatest() {
+            return positionsLatest;
+        }
+
+        public void setPositionsLatest(String positionsLatest) {
+            this.positionsLatest = positionsLatest;
         }
 
         public String getPositionsRejected() {

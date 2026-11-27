@@ -51,7 +51,8 @@ public class BridgeConfiguration {
                 new EventNormalizer(clock),
                 registry,
                 new UnknownDeviceThrottle(clock, properties.getDevices().getUnknownReportInterval()),
-                new BridgeProcessor.Topics(t.getPositionsRaw(), t.getPositionsRejected(), t.getDeviceEvents(),
+                new BridgeProcessor.Topics(t.getPositionsRaw(), t.getPositionsLatest(), t.getPositionsRejected(),
+                        t.getDeviceEvents(),
                         t.getDeviceUnknown()),
                 clock);
     }

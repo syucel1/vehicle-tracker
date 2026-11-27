@@ -21,6 +21,7 @@
     <modules>
         <module>libs/tracker-model</module>
         <module>services/ingest-bridge</module>
+        <module>services/live-hub</module>
         <module>tools/device-simulator</module>
     </modules>
 

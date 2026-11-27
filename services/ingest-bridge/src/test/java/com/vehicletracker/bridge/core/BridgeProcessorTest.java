@@ -27,7 +27,8 @@ class BridgeProcessorTest {
     private static final Instant NOW = Instant.parse("2026-11-06T18:30:00Z");
     private static final Clock CLOCK = Clock.fixed(NOW, ZoneOffset.UTC);
     private static final BridgeProcessor.Topics TOPICS =
-            new BridgeProcessor.Topics("positions.raw", "positions.rejected", "device.events", "device.unknown");
+            new BridgeProcessor.Topics("positions.raw", "positions.latest", "positions.rejected", "device.events",
+                    "device.unknown");
 
     private final PayloadCodec codec = new JacksonPayloadCodec();
 
@@ -67,6 +68,12 @@ class BridgeProcessorTest {
 
         assertTrue(out.value().contains("\"fixTime\":\"2026-11-06T18:27:04Z\""), "ISO-8601 timestamps: " + out.value());
         assertTrue(!out.value().contains("\"deviceTime\""), "nulls are omitted");
+
+        assertEquals(2, result.records().size(), "also written to the compacted latest-position topic");
+        Outbound latest = result.records().get(1);
+        assertEquals("positions.latest", latest.topic());
+        assertEquals("359000000000015", latest.key());
+        assertEquals(out.value(), latest.value());
     }
 
     @Test

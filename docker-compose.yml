@@ -7,6 +7,7 @@
 #   5001-5268 tcp/udp  GPS device protocols (one port per protocol, e.g. GT06 5023, Teltonika 5027)
 #   29092              Kafka for tools running on the host (inside Docker use kafka:9092)
 #   8081               ingest-bridge health & metrics (/actuator/health, /actuator/prometheus)
+#   8090               live-hub: WebSocket /ws/live, debug page /, status /api/status
 #   127.0.0.1:8082     gateway admin UI, for troubleshooting only
 
 name: vehicle-tracker
@@ -61,6 +62,10 @@ services:
         create device.events      604800000
         create positions.rejected 604800000
         create device.unknown     604800000
+        # one record per device (latest position); read from the start by the live hub
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists \
+          --topic positions.latest --partitions 12 --replication-factor 1 \
+          --config cleanup.policy=compact --config min.cleanable.dirty.ratio=0.1 --config segment.ms=3600000
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list
     restart: "no"
 
@@ -101,6 +106,23 @@ services:
       TRACKER_DEVICES_ALLOWED: ${TRACKER_DEVICES_ALLOWED:-}
     ports:
       - "8081:8081"
+    restart: unless-stopped
+
+  # Streams live positions and events to browsers over WebSocket (debug page at http://localhost:8090).
+  live-hub:
+    build:
+      context: .
+      dockerfile: services/live-hub/Dockerfile
+    image: vehicle-tracker/live-hub:dev
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      LIVE_HUB_AUTH_MODE: ${LIVE_HUB_AUTH_MODE:-DEV}
+      LIVE_HUB_DEV_TOKEN: ${LIVE_HUB_DEV_TOKEN:-dev-token}
+    ports:
+      - "8090:8090"
     restart: unless-stopped
 
   # Optional: simulated trackers speaking GT06, Teltonika, H02 and OsmAnd.

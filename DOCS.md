@@ -7,7 +7,7 @@
 | [README.md → Phase 1](README.md#phase-1-device-ingestion) | Phase 1 build/run guide, Kafka topics, message contracts, known limitations | Current |
 | [traccar.xml](deploy/gateway/traccar.xml) | Ingestion gateway configuration | Phase 1 |
 | [mockup/](mockup/README.md) | Clickable HTML mockups of the management console (Google Maps) | Mockup |
-| roadmap/ | Delivery roadmap | Planned |
+| [ROADMAP.md](ROADMAP.md) | Delivery roadmap: phases, items, status | Current |
 | adr/ | Architecture Decision Records | Planned |
 
 ## Design document contents

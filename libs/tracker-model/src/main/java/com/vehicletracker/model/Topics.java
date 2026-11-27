@@ -15,6 +15,12 @@ public final class Topics {
     /** Canonical, validated positions from registered devices. Value: {@link Position}. */
     public static final String POSITIONS_RAW = "positions.raw";
 
+    /**
+     * Compacted topic holding the latest {@link Position} per device (cleanup.policy=compact).
+     * Consumers such as the Live Hub read it from the beginning to rebuild "last known position" state.
+     */
+    public static final String POSITIONS_LATEST = "positions.latest";
+
     /** Messages that could not be parsed or failed validation. Value: {@link RejectedMessage}. */
     public static final String POSITIONS_REJECTED = "positions.rejected";
 
